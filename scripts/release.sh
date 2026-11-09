@@ -110,6 +110,15 @@ PY="$(have python3 && echo python3 || (have python && echo python))"
 [ -n "$PY" ] || die "缺少 python（用于 JSON 处理）"
 jgetpy() { "$PY" -c "$@"; }
 
+# 只取 HTTP 状态码，响应体落到临时文件。用于区分 200/404/其他。
+api_status() {
+  curl -sS -o "${API_BODY:?}" -w '%{http_code}' --max-time 60 \
+    -H "Authorization: Bearer $TOKEN" \
+    -H "Accept: application/vnd.github+json" \
+    "$API$1" 2>/dev/null || printf '000'
+}
+API_BODY="$(mktemp)"
+
 # 把远端 tag ref 解析成它指向的 commit。
 # annotated tag 的 refs/tags/*.object.sha 是 **tag 对象**的 SHA，不是 commit：
 # 直接拿它跟 HEAD 比，只要用的是 `git tag -a` 就必然不相等 —— 这曾经让发版在
@@ -170,28 +179,42 @@ fi
 ok "工作树检查通过"
 
 # 2. Tag 不可变：已存在即拒绝，不覆盖、不移动
+TAG_TAKEN="false"
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
   if [ "$DRY_RUN" = "true" ]; then
     warn "本地已存在 tag $TAG（演练模式只提示；正式发版会中止）"
+    TAG_TAKEN="true"
   else
     die "本地已存在 tag $TAG —— Tag 不可变，请提升版本号"
   fi
 fi
-# git ls-remote --exit-code 的三态必须分开处理：0=存在，2=确实没有，其他=查询本身失败。
-# 早前写法把"查询失败"和"不存在"都当成不存在，代理抽风时会直接放行到后面。
-ls_rc=0
-ls_out="$(git ls-remote --exit-code --tags github "refs/tags/$TAG" 2>&1)" || ls_rc=$?
-case "$ls_rc" in
-  0) if [ "$DRY_RUN" = "true" ]; then
-       warn "远端已存在 tag $TAG（演练模式只提示；正式发版会中止）"
-     else
-       die "远端已存在 tag $TAG —— Tag 不可变，请提升版本号"
-     fi ;;
-  2) : ;;
-  *) die "查询远端 tag 失败（git ls-remote rc=$ls_rc）：
-$ls_out" ;;
+# 三态必须分开：200=存在，404=确实没有，其他=查询本身失败。
+# 早前用 `git ls-remote --exit-code` 判断，把"查询失败"和"不存在"混成一种，
+# 代理一抽风就会被当成"tag 未占用"直接放行。
+# 这里改用 API：脚本其余步骤本来就只依赖 curl，少一条 git 的 TLS 依赖，
+# 也就少一处"同样的网络，git 挂而 curl 通"的歧义。
+tag_code=""
+for attempt in 1 2 3; do
+  tag_code="$(api_status "/repos/$REPO_SLUG/git/ref/tags/$TAG")"
+  if [ "$tag_code" = "200" ] || [ "$tag_code" = "404" ]; then break; fi
+  warn "远端 tag 查询失败（第 $attempt 次，HTTP $tag_code）"
+  sleep 3
+done
+case "$tag_code" in
+  200) if [ "$DRY_RUN" = "true" ]; then
+         warn "远端已存在 tag $TAG（演练模式只提示；正式发版会中止）"
+         TAG_TAKEN="true"
+       else
+         die "远端已存在 tag $TAG —— Tag 不可变，请提升版本号"
+       fi ;;
+  404) : ;;
+  *) die "查询远端 tag 失败（HTTP $tag_code）—— 不按通过处理" ;;
 esac
-ok "Tag $TAG 未被占用"
+if [ "$TAG_TAKEN" = "true" ]; then
+  warn "Tag $TAG 已被占用（演练模式继续往下跑；正式发版会在这一步中止）"
+else
+  ok "Tag $TAG 未被占用"
+fi
 
 # 3. 构建 release（绝不出 debug）
 log "构建 release…"
