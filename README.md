@@ -68,7 +68,7 @@ export M1RACLE_RELEASE_KEY_PASSWORD=...
   `Stop checking xref offsets as at least one (3074 0 R) couldn't be dereferenced`
   → `Replaced read xref table with the results of a brute force search`。
 - 暴力重扫逐字节遍历 1.04 GB，有效扫描速率约 30 MB/s（纯 CPU，非磁盘瓶颈）。采样剖析 self time 91.7% 落在 `RandomAccessBuffer.read/seek/peek/isEOF/isString/rewind`。
-- 其余 1,717 条偏移 **100% 正确，0 条失败** —— 文件本身不算坏，只是这 21 条记录不合法。
+- 其余 1,717 条偏移**全部指向正确位置，0 条解引用失败** → 能得出的结论只是「文件存在结构异常，但绝大多数有效对象偏移正确」，**不等于文件没坏**。
 
 详细证据链见 [`docs/load-hotspot-diagnosis-20261108.md`](docs/load-hotspot-diagnosis-20261108.md)。
 
@@ -90,7 +90,7 @@ PC 侧独立渲染器比对（不依赖 PDFBox）：[`tools/a1-render-diff.py`](
 
 ## 已知未闭合项
 
-- 对象 3095 / 3106 / 3148 被页面 3093 / 3104 / 3146 当作 XObject 引用，但**对象不存在** → 这 3 页现有实现本就缺图（两种加载模式都缺，不是 strict 引入）。
+- 对象 3095 / 3106 / 3148 被页面 3093 / 3104 / 3146 当作 XObject 引用，但**对象不存在** → 已确认的**悬空资源引用**；这三页是否存在可见内容缺失**尚未验证**，待 A1 逐页比对。不做「本就缺图」的断言。
 - strict 下全 420 页的产物一致性结论，待 A1 验证台报告回传后固化。
 - 扩展测试集（正常 PDF / 损坏 xref / 增量更新 / 对象流 / 加密）尚未覆盖。
 - `/proc/self/io` 在本机 app 进程读回全 0，I/O 字节计数缺失。

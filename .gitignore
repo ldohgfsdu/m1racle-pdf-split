@@ -33,3 +33,6 @@ Thumbs.db
 
 # Local release staging (APK + notes go to GitHub Releases, not git)
 dist/
+
+# Release binary downloads used for post-publish verification
+verify-download/
