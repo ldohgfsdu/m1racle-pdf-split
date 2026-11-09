@@ -51,6 +51,40 @@ jobs:
         run: python3 tools/formal/verify_models.py
       - name: Six bounded TLA+ / TLC checks and negative-control mutations
         run: bash formal/pdf/verify_tlc.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.18.0"
+      - name: Generate official pstack statecharts from checked TLA+ specs
+        shell: bash
+        env:
+          TLA2TOOLS: ${{ runner.temp }}/tla2tools-pstack-1.7.4.jar
+          JAVA: java
+          PSTACK_REV: 6b0300214a09fd6029cfb7077043125758cd1fd2
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar --output "$TLA2TOOLS"
+          echo "936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88  $TLA2TOOLS" | sha256sum --check
+          plugin="$RUNNER_TEMP/cursor-pstack"
+          git clone --quiet --filter=blob:none --no-checkout https://github.com/cursor/plugins.git "$plugin"
+          git -C "$plugin" sparse-checkout set pstack/skills/statechart/scripts
+          git -C "$plugin" fetch --quiet --depth 1 origin "$PSTACK_REV"
+          git -C "$plugin" checkout --quiet "$PSTACK_REV"
+          mkdir -p "$RUNNER_TEMP/pdf-statecharts"
+          for model in PdfSourceSession PdfOutlineSelection PdfSplitCleanup PdfReleasePublication; do
+            node "$plugin/pstack/skills/statechart/scripts/statechart.ts" \
+              "$GITHUB_WORKSPACE/formal/pdf/specs/$model.tla" \
+              --config "$GITHUB_WORKSPACE/formal/pdf/specs/$model.cfg" \
+              --view "$GITHUB_WORKSPACE/formal/pdf/views/$model.ts" \
+              --out "$RUNNER_TEMP/pdf-statecharts/$model"
+            test -s "$RUNNER_TEMP/pdf-statecharts/$model/chart.mmd"
+            test -s "$RUNNER_TEMP/pdf-statecharts/$model/report.md"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pdf-formal-statecharts
+          path: ${{ runner.temp }}/pdf-statecharts/
+          if-no-files-found: error
+          retention-days: 30
       - name: Validate local release script syntax
         run: bash -n scripts/release.sh
       - name: Publish lint artifacts for follow-up
