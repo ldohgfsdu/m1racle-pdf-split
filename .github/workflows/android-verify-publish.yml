@@ -1,0 +1,195 @@
+name: PDF Split verify and publish
+
+on:
+  push:
+    branches: [master, "fix/**", "ci/**"]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the Gradle version from master only"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pdf-split-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Android build and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install matching Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_bin=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n1)
+          [[ -x "$sdkmanager_bin" ]]
+          compile_sdk=$(sed -nE 's/^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' build.gradle.kts | head -n1)
+          build_tools=$(sed -nE 's/^[[:space:]]*buildToolsVersion[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' build.gradle.kts | head -n1)
+          [[ -n "$compile_sdk" && -n "$build_tools" ]]
+          "$sdkmanager_bin" "platforms;android-$compile_sdk" "build-tools;$build_tools"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          echo "BUILD_TOOLS_VERSION=$build_tools" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Unit tests, debuggable APK and lint
+        run: bash ./gradlew testDebugUnitTest assembleDebug lintDebug --no-daemon --console=plain
+      - name: Validate local release script syntax
+        run: bash -n scripts/release.sh
+      - name: Publish lint artifacts for follow-up
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdf-split-lint
+          path: build/reports/lint-results*
+          if-no-files-found: ignore
+
+  publish:
+    name: Signed draft, remote verification, public Release
+    needs: verify
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.ref == 'refs/heads/master' &&
+        ((github.event_name == 'workflow_dispatch' && inputs.publish) ||
+         (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish]'))))
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install matching Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager_bin=$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n1)
+          [[ -x "$sdkmanager_bin" ]]
+          compile_sdk=$(sed -nE 's/^[[:space:]]*compileSdk[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' build.gradle.kts | head -n1)
+          build_tools=$(sed -nE 's/^[[:space:]]*buildToolsVersion[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' build.gradle.kts | head -n1)
+          [[ -n "$compile_sdk" && -n "$build_tools" ]]
+          "$sdkmanager_bin" "platforms;android-$compile_sdk" "build-tools;$build_tools"
+          printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+          echo "BUILD_TOOLS_VERSION=$build_tools" >> "$GITHUB_ENV"
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Verify version, previous signed Release and immutable tag intent
+        id: meta
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(sed -nE 's/^val toolVersionName = "([^"]+)".*/\1/p' build.gradle.kts | head -n1)
+          code=$(sed -nE 's/^val toolVersionCode = ([0-9]+).*/\1/p' build.gradle.kts | head -n1)
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$code" =~ ^[1-9][0-9]*$ ]]
+          tag="v$version"
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [[ "$GITHUB_REF_NAME" == "$tag" ]] || { echo "::error::Tag mismatch"; exit 1; }
+            git fetch origin master
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/master || { echo "::error::Tag not based on master"; exit 1; }
+          fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "::error::Release already exists: $tag"; exit 1
+          fi
+          previous=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)
+          [[ -n "$previous" && "$previous" != "$tag" ]]
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+      - name: Require production signing secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.M1RACLE_RELEASE_STORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.M1RACLE_RELEASE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.M1RACLE_RELEASE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.M1RACLE_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$KEYSTORE_BASE64" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]] || {
+            echo "::error::Missing production signing secrets; no unsigned/debug-key fallback"; exit 1;
+          }
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/pdf-release.jks"
+          echo "M1RACLE_RELEASE_STORE_FILE=$RUNNER_TEMP/pdf-release.jks" >> "$GITHUB_ENV"
+          echo "M1RACLE_RELEASE_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "M1RACLE_RELEASE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "M1RACLE_RELEASE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+      - name: Build production signed APK
+        run: bash ./gradlew assembleRelease --no-daemon --console=plain
+      - name: Verify signer continuity and version increase
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_TAG: ${{ steps.meta.outputs.previous }}
+          RELEASE_CODE: ${{ steps.meta.outputs.code }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/previous"
+          gh release download "$PREVIOUS_TAG" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
+          old_apks=("$RUNNER_TEMP"/previous/*.apk)
+          [[ ${#old_apks[@] == 1 && -f "${old_apks[0]}" ]] || {
+            echo "::error::Expected exactly one previous signed APK"; exit 1;
+          }
+          local_apk=build/outputs/apk/release/*.apk
+          new_apks=(build/outputs/apk/release/*.apk)
+          [[ ${#new_apks[@] == 1 && -f "${new_apks[0]}" ]]
+          signer="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+          aapt="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2"
+          "$signer" verify "${old_apks[0]}"
+          "$signer" verify "${new_apks[0]}"
+          old_cert=$("$signer" verify --print-certs "${old_apks[0]}" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          new_cert=$("$signer" verify --print-certs "${new_apks[0]}" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          [[ -n "$old_cert" && "$old_cert" == "$new_cert" ]] || { echo "::error::Signing certificate changed"; exit 1; }
+          old_code=$("$aapt" dump badging "${old_apks[0]}" | sed -nE "s/^package:.* versionCode='([0-9]+)'.*/\1/p" | head -n1)
+          new_code=$("$aapt" dump badging "${new_apks[0]}" | sed -nE "s/^package:.* versionCode='([0-9]+)'.*/\1/p" | head -n1)
+          [[ -n "$old_code" && "$new_code" == "$RELEASE_CODE" ]] && (( RELEASE_CODE > old_code )) || {
+            echo "::error::versionCode must increase from previous signed APK"; exit 1;
+          }
+          cp "${new_apks[0]}" m1racle-pdf-split-release.apk
+          sha256sum m1racle-pdf-split-release.apk > m1racle-pdf-split-release.apk.sha256
+          sha256sum --check m1racle-pdf-split-release.apk.sha256
+      - name: Upload draft; verify downloaded APK, checksum and signer; then publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          apk=m1racle-pdf-split-release.apk
+          gh release create "$RELEASE_TAG" "$apk" "$apk.sha256" --draft \
+            --target "$GITHUB_SHA" --title "M1racle PDF Split $RELEASE_TAG" \
+            --notes "Release passed Gradle tests, signed build, signer continuity and remote asset read-back."
+          mkdir -p "$RUNNER_TEMP/readback"
+          gh release download "$RELEASE_TAG" --pattern "$apk" --dir "$RUNNER_TEMP/readback"
+          gh release download "$RELEASE_TAG" --pattern "$apk.sha256" --dir "$RUNNER_TEMP/readback"
+          cmp "$apk" "$RUNNER_TEMP/readback/$apk"
+          cmp "$apk.sha256" "$RUNNER_TEMP/readback/$apk.sha256"
+          (cd "$RUNNER_TEMP/readback" && sha256sum --check "$apk.sha256")
+          signer="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
+          "$signer" verify "$RUNNER_TEMP/readback/$apk"
+          expected=$("$signer" verify --print-certs "$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          actual=$("$signer" verify --print-certs "$RUNNER_TEMP/readback/$apk" | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          [[ -n "$expected" && "$expected" == "$actual" ]]
+          [[ "$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length')" == "2" ]]
+          gh release edit "$RELEASE_TAG" --draft=false
+          [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == "false" ]]
+          echo "Published $RELEASE_TAG after remote read-back verification"
