@@ -44,6 +44,7 @@ enum class TaskStage {
     CHECKING,
     SAVING,
     DONE,
+    FAILED,
 }
 
 data class TaskSnapshot(
@@ -67,6 +68,7 @@ data class TaskSnapshot(
             TaskStage.CHECKING -> 0.88f
             TaskStage.SAVING -> 0.94f
             TaskStage.DONE -> 1f
+            TaskStage.FAILED -> 0f
         }
 }
 
@@ -85,6 +87,20 @@ sealed interface SplitEvent {
 }
 
 class PdfSplitFailure(message: String) : IOException(message)
+
+/** An ordinary per-part failure preserves completed files for retry. */
+class PdfPartialFailure(
+    val completed: List<SplitOutput>,
+    val failedParts: List<SplitPart>,
+    private val explanation: String,
+) : IOException(explanation) {
+    var cleanupFailures: Int = 0
+    override val message: String
+        get() = explanation + if (cleanupFailures > 0) {
+            "；有 $cleanupFailures 个未完成文件无法删除，请检查保存目录"
+        } else ""
+}
+
 
 /**
  * Lightweight, parseable timing traces. `adb logcat -s M1PDF` gives per-part
@@ -243,6 +259,7 @@ class PdfRangeSplitter(
         val totalPages = parts.sumOf { it.pageCount }
         val createdUris = Collections.synchronizedList(ArrayList<Uri>(parts.size))
         val results = arrayOfNulls<SplitOutput>(parts.size)
+        val failedReasons = ConcurrentHashMap<Int, String>()
         // Longest-part-first scheduling. With page-order dispatch the 165-page
         // chapter starts only after nine small parts; by then every other worker
         // is idle and that one file alone decides the wall clock, which is why
@@ -306,6 +323,8 @@ class PdfRangeSplitter(
         }
 
         var succeeded = false
+        var preserveCompleted = false
+        var partialError: PdfPartialFailure? = null
         var staged: PdfBoxSetup.StagedSource? = null
         try {
             val stageStart = SystemClock.elapsedRealtime()
