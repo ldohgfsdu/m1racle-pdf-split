@@ -14,8 +14,8 @@ plugins {
 // Standalone PDF range-splitting tool. No Reader modules are on the compile
 // classpath: EPUB, notes, bookmarks, Room and the reader chrome are all absent.
 // Public version identity is explicit; never derived from Git.
-val toolVersionCode = 6
-val toolVersionName = "1.2.0-rc2"
+val toolVersionCode = 7
+val toolVersionName = "1.2.0-rc3"
 
 val releaseSigningEnvironmentNames = listOf(
     "M1RACLE_RELEASE_STORE_FILE",
@@ -83,6 +83,9 @@ android {
     buildFeatures {
         compose = true
     }
+
+    // PDFBox logs parser diagnostics through android.util.Log in local tests.
+    testOptions.unitTests.isReturnDefaultValues = true
 
     packaging {
         resources {

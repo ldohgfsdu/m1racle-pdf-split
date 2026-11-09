@@ -82,6 +82,13 @@ class PdfStructureScannerTest {
     // ── Xref stream ────────────────────────────────────────────────────────
 
     @Test
+    fun `unfiltered xref stream is read without inflating it`() {
+        val report = scan(xrefStream(predictor = 1, flate = false))
+        assertEquals(XrefReport.Kind.STREAM, report.kind)
+        assertEquals(4, report.inspectedEntries)
+    }
+
+    @Test
     fun `uncompressed-predictor xref stream is decoded`() {
         val report = scan(xrefStream(predictor = 1))
 
@@ -193,6 +200,7 @@ class PdfStructureScannerTest {
         predictor: Int,
         zeroObject: Int? = null,
         objectStreamEntry: Boolean = false,
+        flate: Boolean = true,
     ): ByteArray {
         val out = ByteArrayOutputStream()
         fun write(text: String) = out.write(text.toByteArray(StandardCharsets.ISO_8859_1))
@@ -225,15 +233,13 @@ class PdfStructureScannerTest {
         val plain = ByteArray(rows.size * rowWidth)
         rows.forEachIndexed { index, bytes -> bytes.copyInto(plain, index * rowWidth) }
         val encoded = if (predictor >= 10) encodePngUp(plain, rowWidth) else plain
-        val compressed = deflate(encoded)
+        val payload = if (flate) deflate(encoded) else encoded
 
-        write(
-            "4 0 obj\n<< /Type /XRef /Size 5 /W [1 4 2] /Index [0 4] " +
-                "/Filter /FlateDecode",
-        )
+        write("4 0 obj\n<< /Type /XRef /Size 5 /W [1 4 2] /Index [0 4]")
+        if (flate) write(" /Filter /FlateDecode")
         if (predictor >= 10) write(" /DecodeParms << /Predictor 12 /Columns $rowWidth >>")
-        write(" /Length ${compressed.size} >>\nstream\n")
-        out.write(compressed)
+        write(" /Length ${payload.size} >>\nstream\n")
+        out.write(payload)
         write("\nendstream\nendobj\n")
         write("startxref\n$xrefStreamOffset\n%%EOF\n")
         return out.toByteArray()

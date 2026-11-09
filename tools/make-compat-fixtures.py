@@ -14,6 +14,9 @@
 | 08-objstream        | xref 流 + 对象流（/ObjStm） |
 | 09-encrypted        | 带 /Encrypt 的文件，扫描器应报 encrypted |
 | 10-undrawn-broken   | 反向对照：坏对象从未被绘制且内容流完整 → 必须仍走 strict |
+| 11-content-array-broken | 两个内容流，第二个的 xref 偏移是 0 → 必须回退，且不许丢第二个流的矩形 |
+| 12-content-array-healthy | 两个内容流都正常 → 必须仍走 strict |
+| 13-many-objects     | 25000 个对象的健康文件，超过扫描器验证上限 → 量否决代价（体积 1.1 MB，只生成不进仓库） |
 
 用法:
     python tools/make-compat-fixtures.py --out fixtures/compat-20261109
@@ -140,6 +143,17 @@ def page(content_ref, resources):
 
 def stream(data, extra=b""):
     return b"<< /Length %d %s>>\nstream\n" % (len(data), extra) + data + b"\nendstream"
+
+
+def fixture_content_array(broken=False):
+    builder = PdfBuilder()
+    builder.add(1, PAGE_TREE)
+    builder.add(2, PAGES)
+    builder.add(3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents [4 0 R 5 0 R] >>")
+    builder.add(4, stream(b"0 g 20 20 40 40 re f\n"))
+    builder.add(5, stream(b"0 g 180 180 80 80 re f\n"))
+    raw = builder.build_classic()
+    return force_bad_entry(raw, 5) if broken else raw
 
 
 def image_stub():
@@ -290,6 +304,23 @@ def fixture_encrypted():
     return b.build_xref_stream(root=1, encrypt_ref=b" /Encrypt 5 0 R")
 
 
+def fixture_many_objects(count=25_000):
+    """健康但对象数超过扫描器的 20000 条验证上限。
+
+    用来量「交叉引用表未完整检查」这条否决的实际代价：它会让这份文件走
+    lenient，但健康文件的 lenient 本来就快（实测 294 ms），不是 57 秒那种
+    灾难 —— 后者只在 xref 有坏记录触发暴力重扫时出现。
+    """
+    b = PdfBuilder()
+    b.add(1, PAGE_TREE)
+    b.add(2, PAGES)
+    b.add(3, page(4, b"<< >>"))
+    b.add(4, stream(b"q 1 0 0 1 0 0 cm Q\n"))
+    for number in range(5, count + 1):
+        b.add(number, b"<< >>")
+    return b.build_classic()
+
+
 FIXTURES = {
     "01-healthy": fixture_healthy,
     "02-big-content-tail": fixture_big_content_tail,
@@ -301,6 +332,9 @@ FIXTURES = {
     "08-objstream": fixture_objstream,
     "09-encrypted": fixture_encrypted,
     "10-undrawn-broken": fixture_undrawn_broken,
+    "11-content-array-broken": lambda: fixture_content_array(broken=True),
+    "12-content-array-healthy": fixture_content_array,
+    "13-many-objects": fixture_many_objects,
 }
 
 

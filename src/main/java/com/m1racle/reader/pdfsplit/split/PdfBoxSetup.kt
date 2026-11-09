@@ -23,6 +23,8 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.Collections
+import java.util.IdentityHashMap
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -198,27 +200,23 @@ internal object PdfBoxSetup {
         val xref = runCatching { PdfStructureScanner.scan(file) }.getOrNull()
         val scanMs = SystemClock.elapsedRealtime() - scanStarted
 
-        // A missing or unreadable scan is not "no bad objects" — it is "no idea".
-        // The probe still runs, but every unresolved reference is then treated as
-        // fatal instead of being assumed merely dangling.
         val veto = FastPathGuard.xrefVeto(xref)
 
-        var strictFailure: String? = null
+        var strictFailure = veto
         val strictStarted = SystemClock.elapsedRealtime()
-        val strictDocument = try {
+        val strictDocument = if (veto != null) null else try {
             loadStrict(file)
         } catch (failure: Throwable) {
             strictFailure = describe(failure)
             null
         }
-        val strictMs = SystemClock.elapsedRealtime() - strictStarted
+        val strictMs = if (veto == null) SystemClock.elapsedRealtime() - strictStarted else -1L
 
         if (strictDocument != null) {
             val probe = try {
                 probePageTree(
                     document = strictDocument,
                     badObjects = xref?.badObjectNumbers?.toSet() ?: emptySet(),
-                    canVet = veto == null,
                 )
             } catch (failure: Throwable) {
                 PageTreeProbe(describe(failure), 0, emptyList())
@@ -237,9 +235,6 @@ internal object PdfBoxSetup {
                             append(" zeroOffset=").append(xref.zeroOffsetEntries)
                             append(" badHeader=").append(xref.badHeaderEntries)
                             append(" entries=").append(xref.inspectedEntries)
-                        }
-                        if (veto != null) {
-                            append(" unvetted=").append(veto)
                         }
                         if (probe.softMisses > 0) {
                             append(" softMiss=").append(probe.softMisses)
@@ -268,39 +263,19 @@ internal object PdfBoxSetup {
         )
     }
 
-    /**
-     * Walks every page and forces every content stream and resource entry to
-     * materialise, so a fast parse cannot hand back a document with holes.
-     *
-     * The hard question is what counts as a hole. Three different things can
-     * come back empty, and they mean different things:
-     *
-     *  - The page tree fails, or a content stream will not decode: the parse is
-     *    broken. Fatal.
-     *  - A reference points at an object whose xref offset is one of the entries
-     *    [badObjects] reports as unusable: lenient parsing would have found that
-     *    object by rescanning the file, strict will not. Fatal — this is exactly
-     *    the silent-loss case the fast path must not ship.
-     *  - A reference points at an object the file never declares at all. Both
-     *    parsers return null here, so strict is not losing anything lenient
-     *    would have kept. Counted and reported, not fatal.
-     *
-     * The third case is not hypothetical: the 988 MB textbook has a page whose
-     * `/KSPX1` names object 3148, which no xref entry ever declared. Treating
-     * that as fatal throws away a 21x speed-up for a resource no content stream
-     * ever draws — A1 proved the page renders byte-identically either way
-     * (2026-11-09, docs/a1-result-20261109.md).
+    /** Check every page before AUTO uses a strict document. Only unused XObjects
+     * may be unresolved, and only when the drawing scan is complete.
+     * [badObjects] is diagnostic context for the unresolved entries.
      */
     internal fun probePageTree(
         document: PDDocument,
         badObjects: Set<Int>,
-        canVet: Boolean = true,
     ): PageTreeProbe {
         val pages = document.pages
         val count = pages.count
         if (count <= 0) return PageTreeProbe("页树为空", 0, emptyList())
 
-        val state = ProbeState(badObjects, canVet)
+        val state = ProbeState(badObjects)
         for (index in 0 until count) {
             inspectPage(pages[index], index, state)
             if (state.fatal != null) break
@@ -313,7 +288,6 @@ internal object PdfBoxSetup {
 
         // /Contents is either one stream or an array of streams, and every
         // element has to exist and decode.
-        val contentsItem = runCatching { cos.getItem(COSName.CONTENTS) }.getOrNull()
         val contents = runCatching { cos.getDictionaryObject(COSName.CONTENTS) }.getOrElse { failure ->
             state.fail("第 ${index + 1} 页 /Contents 无法解析：${describe(failure)}")
             return
@@ -321,42 +295,58 @@ internal object PdfBoxSetup {
 
         // Decoding the content stream is both an integrity check and the only way
         // to learn which XObject names this page actually paints.
-        var evidence = DrawingEvidence.UNREAD
-        if (contents == null) {
+        val evidence = if (contents == null) {
             if (cos.containsKey(COSName.CONTENTS)) {
-                val bad = badReferenceNumber(contentsItem, state)
-                if (bad != null) {
-                    state.fail(
-                        "第 ${index + 1} 页 /Contents 引用了坏对象 $bad" +
-                            "（宽松解析会重扫找到，严格解析不会）",
-                    )
-                    return
-                }
-                state.soft("第 ${index + 1} 页 /Contents")
-            } else {
-                // No /Contents key at all: the page paints nothing, so no XObject
-                // can be drawn by it. That is a sound "nothing drawn", unlike an
-                // unreadable content stream.
-                evidence = DrawingEvidence(emptySet(), complete = true)
+                state.fail("第 ${index + 1} 页 /Contents 无法解析")
+                return
             }
+            DrawingEvidence(emptySet(), complete = true)
         } else {
-            val read = runCatching { readDrawings(contentStreams(contents), MAX_CONTENT_SCAN) }
+            runCatching { readDrawings(contentStreams(contents), MAX_CONTENT_SCAN) }
                 .getOrElse { failure ->
                     state.fail("第 ${index + 1} 页内容流无法解码：${describe(failure)}")
                     return
                 }
-            evidence = read
         }
 
         val resources = runCatching { page.resources }.getOrElse { failure ->
             state.fail("第 ${index + 1} 页资源字典无法解析：${describe(failure)}")
             return
-        } ?: return
+        }
+        if (resources == null) {
+            if (hasResourceDeclaration(cos) || evidence.names.isNotEmpty()) {
+                state.fail("第 ${index + 1} 页 /Resources 无法解析")
+            }
+            return
+        }
+        inspectResources(resources.cosObject, index, state, evidence, depth = 0)
+    }
 
+    private fun hasResourceDeclaration(page: COSDictionary): Boolean {
+        val visited = Collections.newSetFromMap(IdentityHashMap<COSDictionary, Boolean>())
+        var current: COSDictionary? = page
+        while (current != null && visited.add(current)) {
+            if (current.containsKey(COSName.RESOURCES)) return true
+            current = current.getDictionaryObject(COSName.PARENT) as? COSDictionary
+        }
+        return false
+    }
+
+    private fun inspectResources(
+        resources: COSDictionary,
+        index: Int,
+        state: ProbeState,
+        evidence: DrawingEvidence,
+        depth: Int,
+    ) {
         for (category in PAGE_RESOURCE_KEYS) {
-            val dictionary = resources.cosObject.getDictionaryObject(category) as? COSDictionary
-                ?: continue
-            inspectResourceDictionary(dictionary, index, category, state, evidence, depth = 0)
+            if (!resources.containsKey(category)) continue
+            val dictionary = resources.getDictionaryObject(category) as? COSDictionary
+            if (dictionary == null) {
+                state.fail("第 ${index + 1} 页 /${category.name} 资源字典无法解析")
+                return
+            }
+            inspectResourceDictionary(dictionary, index, category, state, evidence, depth)
             if (state.fatal != null) return
         }
     }
@@ -371,14 +361,10 @@ internal object PdfBoxSetup {
      * exactly the case this protects.
      */
     private fun readDrawings(streams: List<COSStream>, budget: Int): DrawingEvidence {
-        // `/Contents` 存在却一个流都拿不到，说明这条引用我们没解析成功。
-        // 返回空集合并标记为完整，会让本来被绘制的资源被判成"未使用" —— 这
-        // 正是对象流样本暴露出来的假阴性。宁可判不可证。
-        if (streams.isEmpty()) return DrawingEvidence.UNREAD
-
         val builder = StringBuilder()
         var truncated = false
-        for (stream in streams) {
+        for ((index, stream) in streams.withIndex()) {
+            if (index > 0 && builder.length < budget) builder.append('\n')
             val remaining = budget - builder.length
             if (remaining <= 0) {
                 truncated = true
@@ -409,48 +395,18 @@ internal object PdfBoxSetup {
             }
             if (value == null) {
                 val bad = badReferenceNumber(item, state)
-                if (bad != null) {
-                    // `severityForUnresolved` is what keeps "unpainted" from
-                    // being concluded out of an incomplete reading: a truncated
-                    // content stream, an unpaired Do operator or an escaped name
-                    // all turn this into a fatal instead of a soft miss.
-                    val severity = FastPathGuard.severityForUnresolved(
-                        isXObject = category == COSName.XOBJECT,
-                        name = key.name,
-                        evidence = evidence,
-                    )
-                    if (severity != MissSeverity.FATAL) {
-                        // Declared, unresolvable, and provably never painted: no
-                        // content stream says `/Name Do`, so neither parser turns
-                        // this into pixels. The 988 MB textbook has exactly this
-                        // case on page 15 (`/KSPX1` → 3148) and A1 proved the
-                        // page renders byte-identically under both parsers.
-                        state.soft(
-                            "第 ${pageIndex + 1} 页 ${category.name}/$key 引用了坏对象 $bad，但未被绘制",
-                        )
-                        continue
-                    }
-                    state.fail(
-                        "第 ${pageIndex + 1} 页 ${category.name}/$key 引用了坏对象 $bad" +
-                            if (evidence.complete) {
-                                "（内容流确实绘制了它，严格解析拿不到 = 缺图）"
-                            } else {
-                                "（内容流未能完整读取，无法证明它没被绘制）"
-                            },
-                    )
+                val problem = if (bad == null) "无法解析" else "引用了坏对象 $bad"
+                val location = "第 ${pageIndex + 1} 页 ${category.name}/${key.name}"
+                val severity = FastPathGuard.severityForUnresolved(
+                    isXObject = category == COSName.XOBJECT,
+                    name = key.name,
+                    evidence = evidence,
+                )
+                if (severity == MissSeverity.FATAL) {
+                    state.fail("$location $problem，无法确认未被使用")
                     return
                 }
-                if (!state.canVet) {
-                    // No trustworthy bad-object list: an unresolved reference
-                    // cannot be told apart from "referenced a defective offset",
-                    // so the benign reading must not be assumed.
-                    state.fail(
-                        "第 ${pageIndex + 1} 页 ${category.name}/$key 解析为空，且结构扫描不可用" +
-                            "（无法判断它是否属于坏记录）",
-                    )
-                    return
-                }
-                state.soft("第 ${pageIndex + 1} 页 ${category.name}/$key")
+                state.soft("$location $problem，但未被绘制")
                 continue
             }
 
@@ -459,37 +415,32 @@ internal object PdfBoxSetup {
             // without reading them would classify anything the form paints as
             // unpainted — a false negative one level down.
             val stream = value as? COSStream
-            if (category == COSName.XOBJECT && stream != null && depth < MAX_FORM_DEPTH) {
+            if (category == COSName.XOBJECT && stream != null &&
+                (!evidence.complete || key.name in evidence.names)
+            ) {
                 val subtype = runCatching {
                     stream.getDictionaryObject(COSName.SUBTYPE) as? COSName
                 }.getOrNull()
                 if (subtype == COSName.FORM) {
+                    if (depth >= MAX_FORM_DEPTH) {
+                        state.fail("第 ${pageIndex + 1} 页 Form /${key.name} 超出资源检查深度")
+                        return
+                    }
                     // Form 的 /Resources 在它自己的字典里，不在字典本身。
                     // `PDResources(stream)` 取的是**这个 Form 的字典**，拿它当
                     // 资源字典去找 /XObject 永远为空 —— 内层坏引用因此从未被
                     // 检查过（nested-form 样本暴露）。
-                    val nested = runCatching {
-                        stream.getDictionaryObject(COSName.RESOURCES) as? COSDictionary
-                    }.getOrNull()
+                    val nested = stream.getDictionaryObject(COSName.RESOURCES) as? COSDictionary
                     if (nested != null) {
                         val formEvidence = FastPathGuard.combine(
                             evidence,
-                            runCatching { readDrawings(listOf(stream), MAX_CONTENT_SCAN) }
-                                .getOrDefault(DrawingEvidence.UNREAD),
+                            readDrawings(listOf(stream), MAX_CONTENT_SCAN),
                         )
-                        for (inner in PAGE_RESOURCE_KEYS) {
-                            val innerDictionary = nested.getDictionaryObject(inner) as? COSDictionary
-                                ?: continue
-                            inspectResourceDictionary(
-                                innerDictionary,
-                                pageIndex,
-                                inner,
-                                state,
-                                formEvidence,
-                                depth + 1,
-                            )
-                            if (state.fatal != null) return
-                        }
+                        inspectResources(nested, pageIndex, state, formEvidence, depth + 1)
+                        if (state.fatal != null) return
+                    } else if (stream.containsKey(COSName.RESOURCES)) {
+                        state.fail("第 ${pageIndex + 1} 页 Form /${key.name} 的 /Resources 无法解析")
+                        return
                     }
                 }
             }
@@ -503,17 +454,15 @@ internal object PdfBoxSetup {
         return number.takeIf { it in state.bad }
     }
 
-    /** Flattens `/Contents` into the streams it actually holds. */
+    /** A partially readable array is an incomplete page, even if some streams survive. */
     private fun contentStreams(contents: COSBase): List<COSStream> = when (contents) {
         is COSStream -> listOf(contents)
-        is COSArray -> contents.mapNotNull { element ->
-            val resolved = (element as? COSObject)?.let { reference ->
-                runCatching { reference.getObject() }.getOrNull()
-            } ?: element
-            resolved as? COSStream
+        is COSArray -> List(contents.size()) { index ->
+            contents.getObject(index) as? COSStream
+                ?: throw IOException("第 ${index + 1} 个内容流无法解析")
         }
 
-        else -> emptyList()
+        else -> throw IOException("内容不是流或流数组")
     }
 
     /** Decodes up to [limit] bytes of a content stream as Latin-1 text. */
@@ -535,7 +484,6 @@ internal object PdfBoxSetup {
 
     private class ProbeState(
         private val badObjects: Set<Int>,
-        val canVet: Boolean = true,
     ) {
         var fatal: String? = null
             private set

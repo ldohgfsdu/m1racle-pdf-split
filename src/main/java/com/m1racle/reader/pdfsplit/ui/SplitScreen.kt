@@ -283,10 +283,10 @@ private fun SourceCard(
             val head = "文件结构异常：交叉引用表 ${state.source.xrefEntries} 条记录中有 " +
                 "${state.source.xrefZeroOffsets} 条指向偏移 0"
             Text(
-                text = if (state.source.fastLoad == true) {
-                    "$head，但没有任何一页真正绘制它们，已正常走快速解析；拆分结果不受影响。"
-                } else {
-                    "$head，且被页面实际引用，已自动切换到兼容解析；拆分结果不受影响，但解析会比正常文件慢。"
+                text = when (state.source.fastLoad) {
+                    true -> "$head。已通过快速解析检查。"
+                    false -> "$head。已使用兼容解析，耗时可能更长。"
+                    null -> "$head。"
                 },
                 fontSize = 11.sp,
                 color = Palette.textSecondary,

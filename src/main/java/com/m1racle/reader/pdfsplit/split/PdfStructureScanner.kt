@@ -47,6 +47,9 @@ internal object PdfStructureScanner {
     private val INDEX_PATTERN = Regex("/Index\\s*\\[([^\\]]*)]")
     private val SIZE_PATTERN = Regex("/Size\\s+(\\d{1,9})")
     private val PREV_PATTERN = Regex("/Prev\\s+(\\d{1,12})")
+    private val PREV_KEY = Regex("/Prev\\b")
+    private val FILTER_KEY = Regex("/Filter\\b")
+    private val SINGLE_FILTER = Regex("/Filter\\s*(?:/(\\w+)|\\[\\s*/(\\w+)\\s*])")
     private val PREDICTOR_PATTERN = Regex("/Predictor\\s+(\\d+)")
     private val COLUMNS_PATTERN = Regex("/Columns\\s+(\\d+)")
 
@@ -169,9 +172,15 @@ internal object PdfStructureScanner {
         var current = top
         var depth = 0
 
-        while (depth < MAX_PREV_DEPTH) {
-            val prev = prevOffset(current, raf, size) ?: break
-            if (prev <= 0L || prev >= size || !visited.add(prev)) break
+        while (current.hasPrev) {
+            val prev = prevOffset(current, raf, size)
+            if (depth >= MAX_PREV_DEPTH || prev == null || prev <= 0L || prev >= size || !visited.add(prev)) {
+                return merged.copy(
+                    startXrefValid = false,
+                    reason = "增量更新 /Prev 链未完整检查",
+                    scanMs = millisSince(started),
+                )
+            }
 
             val head = readAt(raf, prev, 2048)
                 ?: return merged.copy(
@@ -220,7 +229,12 @@ internal object PdfStructureScanner {
             readAt(raf, report.startXref, window) ?: return null,
             StandardCharsets.ISO_8859_1,
         )
-        return PREV_PATTERN.find(text)?.groupValues?.get(1)?.toLongOrNull()
+        val dictionary = if (report.kind == XrefReport.Kind.TABLE) {
+            text.substringAfter("trailer", "").substringBefore("startxref")
+        } else {
+            text.substringBefore("stream")
+        }
+        return PREV_PATTERN.find(dictionary)?.groupValues?.get(1)?.toLongOrNull()
     }
 
     // ── Classic table ───────────────────────────────────────────────────────
@@ -276,15 +290,15 @@ internal object PdfStructureScanner {
             break
         }
 
-        val trailerText = text.substringAfter("trailer", "")
+        val trailerText = text.substringAfter("trailer", "").substringBefore("startxref")
         val encrypted = trailerText.contains("/Encrypt")
-        val hasPrev = Regex("/Prev\\s+\\d+").containsMatchIn(trailerText)
+        val hasPrev = PREV_KEY.containsMatchIn(trailerText)
 
         return accumulator.build(
             size = size,
             startXref = offset,
             kind = XrefReport.Kind.TABLE,
-            startXrefValid = true,
+            startXrefValid = trailerText.isNotBlank() && !trailerText.contains("/XRefStm"),
             encrypted = encrypted,
             hasPrev = hasPrev,
             declared = declared,
@@ -336,13 +350,20 @@ internal object PdfStructureScanner {
             }
         }
 
-        val compressed = readAt(raf, offset + dataStart, minOf(length, 8 * 1024 * 1024))
+        val payload = readAt(raf, offset + dataStart, minOf(length, 8 * 1024 * 1024))
+            ?.takeIf { it.size == length }
             ?: return XrefReport.unreadable(size, "xref 流数据读取失败", millisSince(started))
 
         val dict = headText.substring(0, streamKeyword)
-        val filters = Regex("/Filter\\s*\\[?\\s*/(\\w+)").find(dict)?.groupValues?.get(1).orEmpty()
+        val filterMatch = SINGLE_FILTER.find(dict)
+        val filters = when {
+            filterMatch != null -> filterMatch.groupValues[1].ifEmpty { filterMatch.groupValues[2] }
+            FILTER_KEY.containsMatchIn(dict) -> "unsupported"
+            else -> ""
+        }
         val decoded = when (filters) {
-            "", "FlateDecode", "Fl" -> inflate(compressed) ?: return XrefReport.unreadable(
+            "" -> payload
+            "FlateDecode", "Fl" -> inflate(payload) ?: return XrefReport.unreadable(
                 size,
                 "xref 流 Flate 解压失败",
                 millisSince(started),
@@ -353,7 +374,7 @@ internal object PdfStructureScanner {
                 startXrefValid = true,
                 kind = XrefReport.Kind.UNKNOWN,
                 encrypted = dict.contains("/Encrypt"),
-                hasPrev = Regex("/Prev\\s+\\d+").containsMatchIn(dict),
+                hasPrev = PREV_KEY.containsMatchIn(dict),
                 declaredEntries = 0,
                 inspectedEntries = 0,
                 inUseEntries = 0,
@@ -409,7 +430,7 @@ internal object PdfStructureScanner {
             kind = XrefReport.Kind.STREAM,
             startXrefValid = true,
             encrypted = dict.contains("/Encrypt"),
-            hasPrev = Regex("/Prev\\s+\\d+").containsMatchIn(dict),
+            hasPrev = PREV_KEY.containsMatchIn(dict),
             declared = declared,
             reason = if (accumulator.inspected == 0) "xref 流解析出 0 个条目" else "",
             scanMs = millisSince(started),

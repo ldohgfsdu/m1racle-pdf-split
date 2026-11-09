@@ -114,7 +114,7 @@ probePageTree(strictDocument, xref?.badObjectNumbers?.toSet() ?: emptySet())
 **已离线验证（可复现）**
 
 - 单测 54 → **76 例，0 失败 0 跳过**。
-  - `FastPathGuardTest` 22 例：`#xx` 还原、1 MiB 截断、`Do` 计数不一致、嵌套合并、xref 否决的六种情形。
+  - `FastPathGuardTest` 17 例：`#xx` 还原、1 MiB 截断、`Do` 计数不一致、嵌套合并、xref 否决的六种情形。
   - `CompatFixturesTest` 5 例：健康表不否决、xref 关键字破坏被否决、增量更新能报出旧代坏对象、对象流坏条目被报出、加密被否决。
 - `07-incremental` 与 `08-objstream` 两条**先失败后修好**，是这一轮实际发现的扫描器缺陷，不是补写的断言。
 
@@ -245,3 +245,58 @@ adb push build/fixtures/. /sdcard/Download/fixtures/
 ```
 
 `tools/device-fixture-matrix.sh` 走 SAF 选择器（与真实用户一致），逐条采集 `M1PDF` 的 `decision=` 行。脚本内部有一处坑已记住：`uiautomator dump` 是**单行 XML**，不能用 `tr '>' '\n'` 切；早期版本因此把整份文档的 bounds 全捞出来、取"面积最小"选中了返回箭头，点击全打偏。
+
+
+---
+
+## 九、第二轮：合并外部补丁（内容流数组）后的复测
+
+外部 agent 在 `e8afa68` 基线上提交了一份补丁（13 个文件），修的是另一类静默丢页内内容：**页面的 `/Contents` 是数组时，第二个流的 xref 偏移损坏**。旧实现用 `mapNotNull` 摊平数组，解析失败的流被悄悄丢掉，页面少画一个矩形，却仍然通过探测走严格解析。
+
+补丁已合入并通过复测，版本 **1.2.0-rc3（code 7）**，sha256 `8cb334541d93a55c7e60b3637012e7c8a328b250d46e383da736c555137b1d1e`。
+
+### 9.1 补丁的关键改动（我复核过的）
+
+| 位置 | 改动 | 评价 |
+| --- | --- | --- |
+| `contentStreams` | 数组元素解析失败直接 `throw IOException("第 N 个内容流无法解析")`，不再 `mapNotNull` 静默丢弃 | 这是本轮的核心修复，方向正确 |
+| `xrefVeto` | 新增「`inspectedEntries != declaredEntries` 或 `unverifiedEntries > 0`」→ 否决 | 更严，代价见 9.3 |
+| `open(AUTO)` | 一旦否决就**直接走 lenient**，不再"尝试 strict 但把解析不到的引用判 fatal" | 删掉了我原来的 `canVet` 分支，逻辑更少更硬 |
+| Form 嵌套 | `depth >= MAX_FORM_DEPTH` 由"停止下降"改为 **fatal** | fail-closed，但深嵌套 Form 的合法文件会多回退一次 |
+| `inspectResources` | 资源类别键存在但字典解析不出来 → fatal；Form 的 `/Resources` 解析不出来 → fatal | 合理 |
+| 扫描器 | `/Prev` 链不完整（超深、成环、读不出）→ `startXrefValid=false`；`/Prev` 只在 trailer/字典范围内查找；`/XRefStm` 混合文件判为不可用；无 `/Filter` 的 xref 流不再错误地 inflate | 都是真问题，收紧方向对 |
+| 测试 | `testOptions.unitTests.isReturnDefaultValues = true` + `AutoContentArrayTest` | **能力升级**：现在能在 JVM 上端到端跑 `open(AUTO)`、import/save、再读回内容流，不必依赖真机 |
+
+### 9.2 rc3 真机全矩阵（11 个样本）
+
+| 样本 | 期望 | rc3 实测 |
+| --- | --- | --- |
+| 01-healthy | strict | strict ✓ |
+| 02-big-content-tail | lenient | lenient：`Im9 引用了坏对象 5，无法确认未被使用` ✓ |
+| 03-escaped-name | lenient | lenient：`KSPX1 …无法确认未被使用` ✓ |
+| 04-nested-form | lenient | lenient：`Im7 …无法确认未被使用` ✓ |
+| 05-unpaired-do | lenient | lenient：`Im2 引用了坏对象 6，无法确认未被使用` ✓ |
+| 06-xref-garbage | lenient | lenient：`交叉引用表格式无法识别`（不再先试 strict）✓ |
+| 07-incremental | lenient | lenient：`Im1 …无法确认未被使用`，`prev=true` ✓ |
+| 08-objstream | lenient | lenient：`内容不是流或流数组` ✓ |
+| 10-undrawn-broken | strict | strict，`softMiss=1` ✓ 反向对照 |
+| 11-content-array-broken | lenient | lenient：`第 2 个内容流无法解析` ✓ |
+| 12-content-array-healthy | strict | strict ✓ |
+
+教材（988 MB / 420 页 / 21 条 offset=0）：**strict**，`loadMs=2995`，`softMiss=1`；拆分 `finished=21/21`、`totalMs=7620`，产物总字节 **1,030,595,782 B**，与 1.1.1／rc2 完全一致。
+
+单测 **80 例，0 失败 0 跳过**。
+
+### 9.3 我原本担心、实测后被推翻的一点
+
+`unverifiedEntries > 0` 这条新否决撞上扫描器的 `MAX_VERIFIED_ENTRIES = 20_000`：任何对象数超过两万的文件都会被判"未完整检查"而失去快速路径。我据此生成了 `13-many-objects.pdf`（25,000 个对象，健康）验证。
+
+结果 **`loadMs=294 ms`**。也就是说这个否决代价可忽略——因为 57 秒那种灾难只在 xref 有坏记录、触发暴力重扫时出现；健康文件的 lenient 本来就快。所以不需要为它调 `MAX_VERIFIED_ENTRIES`，记一笔即可。
+
+反过来说，这也提醒：**"走 lenient"不等于"慢 20 倍"**，两者不能混为一谈。
+
+### 9.4 本轮遗留
+
+- `05` 第一次跑出现 `NO-PROBE`，原因是测试脚本在列表惯性滚动时点击落空（选择器底部仍是 `预览(0/100)`）。已给脚本加"滑动后等惯性停 + 校验选中状态"，复跑即通过。这是脚本缺陷，不是应用缺陷。
+- UI 提示条被改成三段式（`已通过快速解析检查` / `已使用兼容解析，耗时可能更长`）。比原来保守，但也丢了原因说明；且只在 `xrefZeroOffsets > 0` 时显示，**非零偏移原因导致的回退不会给任何解释**。属可改进项，不阻塞。
+- 09-encrypted 仍未能通过系统文档选择器投喂（合成加密 PDF 不被列出），只有扫描器级证据。

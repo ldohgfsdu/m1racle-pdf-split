@@ -65,6 +65,27 @@ tap_when() {
   return 0
 }
 
+# 目标可能在列表下方（选择器按时间倒序，推得早的样本排在后面）。
+# 找不到就往上滑一屏再找；滑完要等惯性停，否则拿到的坐标已经过时，
+# 点下去会落在空档上 —— 表现是选择器底部仍显示「预览(0/100)」。
+tap_scrolled() {
+  local want="$1" i
+  for i in $(seq 1 8); do
+    if wait_xy "$want" 1; then
+      tap_xy
+      sleep 1
+      if adb shell uiautomator dump "$DUMP" >/dev/null 2>&1 &&
+        ! adb shell cat "$DUMP" 2>/dev/null | grep -q '预览(0/100)'; then
+        return 0
+      fi
+      continue
+    fi
+    adb shell input swipe 600 1900 600 900 250
+    sleep 2
+  done
+  return 1
+}
+
 ensure_foreground() {
   local i top
   for i in 1 2 3 4; do
@@ -94,11 +115,11 @@ feed() {
 
   # 优先在「最近」里直接点（样本刚推上去，媒体库已索引）；
   # 找不到才走 浏览 → Download → fixtures。
-  if ! tap_when "$name" 10; then
+  if ! tap_scrolled "$name"; then
     tap_when "浏览" 6 || { log "$name 没有浏览标签"; return 1; }
     tap_when "Download" 8 || { log "$name 找不到 Download"; return 1; }
     tap_when "fixtures" 8 || { log "$name 找不到 fixtures"; return 1; }
-    tap_when "$name" 8 || { log "$name 列表里找不到该文件"; return 1; }
+    tap_scrolled "$name" || { log "$name 列表里找不到该文件"; return 1; }
   fi
   tap_when "确定" 6 || true
 

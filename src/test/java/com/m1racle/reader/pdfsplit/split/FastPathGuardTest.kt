@@ -225,4 +225,11 @@ class FastPathGuardTest {
         reason = "test",
         scanMs = 1,
     )
+
+    @Test
+    fun `partial and unverified xref scans veto strict parsing`() {
+        val complete = report(kind = XrefReport.Kind.TABLE, inspected = 10)
+        assertNotNull(FastPathGuard.xrefVeto(complete.copy(declaredEntries = 11)))
+        assertNotNull(FastPathGuard.xrefVeto(complete.copy(unverifiedEntries = 1)))
+    }
 }

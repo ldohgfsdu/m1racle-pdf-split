@@ -72,7 +72,7 @@ export M1RACLE_RELEASE_KEY_PASSWORD=...
 
 详细证据链见 [`docs/load-hotspot-diagnosis-20261108.md`](docs/load-hotspot-diagnosis-20261108.md)。
 
-**当前状态（v1.1.1 起）：`LoadMode.AUTO` 已接入生产。** 5 个会完整加载文档的入口（probe、正文扫描、书签读取、页码标签、拆分 worker）全部走 `PdfBoxSetup.open(file, LoadMode.AUTO)`，默认路径是「先严格、探不通再回退宽松」，见下节。
+**当前状态（v1.1.1 起）：`LoadMode.AUTO` 已接入生产。** 文件探测、正文扫描、书签读取、页码标签和拆分 worker 都走 `PdfBoxSetup.open(file, LoadMode.AUTO)`。交叉引用扫描通过后才尝试严格解析。
 
 A1 实测（2026-11-09，Xiaomi 25098PN5AC / Android 16）：420 页逐页语义指纹**完全一致**、差异 0、证据不足 0，poppler 独立渲染抽样交叉验证亦一致。结论与证据见 [`docs/a1-result-20261109.md`](docs/a1-result-20261109.md)。
 
@@ -82,6 +82,7 @@ A1 实测（2026-11-09，Xiaomi 25098PN5AC / Android 16）：420 页逐页语义
 
 ```
 PdfStructureScanner.scan(file)      独立 xref 扫描器，不依赖 PDFBox，1 GB / 15~40 ms
+  → 扫描不完整或不支持               直接用 lenient
   → loadStrict                       PDFParser(isLenient = false)
   → probePageTree(doc, badObjects)   逐页遍历页树 + 解码内容流
       fatal  → close() 重开 lenient
@@ -92,10 +93,9 @@ PdfStructureScanner.scan(file)      独立 xref 扫描器，不依赖 PDFBox，1
 
 | 情形 | 判定 | 理由 |
 | --- | --- | --- |
-| 页树 / 内容流无法解析 | **fatal** | 解析本身坏了 |
-| 引用指向坏对象，且该名字被内容流 `Do` 绘制 | **fatal** | 宽松会重扫找到、严格不会，等于真丢图 |
-| 引用指向坏对象，但从未被 `Do` 绘制 | **soft** | 不参与渲染，A1 已证明产物逐页相同 |
-| 引用指向从未声明的对象（两种解析器都返回 null） | **soft** | 源文件本身如此，与加载模式无关 |
+| 页树、内容流数组中的任意一项或已声明的资源字典无法解析 | **fatal** | 页面可能缺少内容或资源 |
+| 资源引用无法解析，且无法确认它未被绘制 | **fatal** | 严格解析可能丢失兼容解析能够恢复的内容 |
+| XObject 引用无法解析，且完整的绘制扫描未发现它被使用 | **soft** | 保留快速路径，记录未绘制的资源 |
 
 绘制判据：对解码后的内容流文本跑 `/([A-Za-z0-9_.+#-]{1,64})\s+Do\b` 收集被绘制名，再与坏引用名比对。决策结果写入日志 `decision=[strict|lenient ... softMiss=N first=...]`，并在源文件卡片上以「快速解析 / 兼容解析 + 耗时」直读展示。
 

@@ -137,10 +137,7 @@ internal object FastPathGuard {
      * Whether the xref scan gives us a trustworthy list of bad object numbers.
      *
      * Returns null when the answer is yes. A non-null string is the reason the
-     * scan cannot be relied on, and the probe then treats *every* unresolved
-     * reference as fatal instead of assuming it was never declared: with no bad
-     * list, "unresolved" and "in the bad list" are indistinguishable, and
-     * guessing the benign one is how a silent image loss ships.
+     * scan cannot be relied on and AUTO goes directly to compatible parsing.
      */
     fun xrefVeto(report: XrefReport?): String? {
         if (report == null) return "结构扫描失败"
@@ -149,6 +146,9 @@ internal object FastPathGuard {
         if (report.inspectedEntries == 0) return "交叉引用表未产出任何记录"
         if (!report.startXrefValid) return "startxref 不可用（${report.startXref}）"
         if (report.encrypted) return "文件已加密，扫描不完整"
+        if (report.inspectedEntries != report.declaredEntries || report.unverifiedEntries > 0) {
+            return "交叉引用表未完整检查"
+        }
         return null
     }
 }
