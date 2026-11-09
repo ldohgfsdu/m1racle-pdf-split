@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Debug-only benchmark harness. Never merged into the release APK:
+         this source set exists solely to measure PdfBoxSetup load cost on a
+         real device without going through SAF / UI interaction. -->
+    <application>
+        <activity
+            android:name=".bench.LoadBenchActivity"
+            android:exported="true"
+            android:label="PDF Load Bench"
+            android:theme="@style/Theme.PdfSplit" />
+    </application>
+
+</manifest>

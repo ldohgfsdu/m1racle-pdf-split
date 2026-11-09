@@ -1,0 +1,32 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Local machine configuration
+local.properties
+*.iml
+.idea/
+captures/
+
+# Signing material — never commit
+*.jks
+*.keystore
+*.p12
+*.pfx
+signing/
+
+# Build outputs
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Verification / profiling artifacts
+a1-verify/
+*.trace
+*.pftrace
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,6 @@
+# Normalize to LF in the repository; keep Windows scripts on CRLF.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.jar binary
+*.png binary
+*.pgm binary
