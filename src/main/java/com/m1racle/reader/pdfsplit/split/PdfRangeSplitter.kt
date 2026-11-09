@@ -385,31 +385,41 @@ class PdfRangeSplitter(
                                         val index = dispatchOrder[slot]
                                         val part = parts[index]
                                         val partStart = SystemClock.elapsedRealtime()
-                                        val uri = processPart(
-                                            source = source,
-                                            part = part,
-                                            taskIndex = index,
-                                            outputTreeUri = outputTreeUri,
-                                            deepVerify = deepVerify,
-                                            sinkJob = parentJob,
-                                            onStage = { stage, pageInPart ->
-                                                publish(index, stage, pageInPart)
-                                            },
-                                            onCreate = { created -> createdUris.add(created) },
-                                        )
-                                        results[index] = SplitOutput(
-                                            displayName = part.outputName,
-                                            uri = uri,
-                                            pageCount = part.pageCount,
-                                            startPage1 = part.startPage1,
-                                            endPage1 = part.endPage1,
-                                        )
-                                        publish(index, TaskStage.DONE, part.pageCount)
-                                        finishedParts.incrementAndGet()
-                                        SplitDiagnostics.log(
-                                            "part=$index worker=$workerId pages=${part.pageCount} " +
-                                                "totalMs=${SystemClock.elapsedRealtime() - partStart}",
-                                        )
+                                        try {
+                                            val uri = processPart(
+                                                source = source,
+                                                part = part,
+                                                taskIndex = index,
+                                                outputTreeUri = outputTreeUri,
+                                                deepVerify = deepVerify,
+                                                sinkJob = parentJob,
+                                                onStage = { stage, pageInPart ->
+                                                    publish(index, stage, pageInPart)
+                                                },
+                                                onCreate = { created -> createdUris.add(created) },
+                                            )
+                                            results[index] = SplitOutput(
+                                                displayName = part.outputName,
+                                                uri = uri,
+                                                pageCount = part.pageCount,
+                                                startPage1 = part.startPage1,
+                                                endPage1 = part.endPage1,
+                                            )
+                                            publish(index, TaskStage.DONE, part.pageCount)
+                                            finishedParts.incrementAndGet()
+                                            SplitDiagnostics.log(
+                                                "part=$index worker=$workerId pages=${part.pageCount} " +
+                                                    "totalMs=${SystemClock.elapsedRealtime() - partStart}",
+                                            )
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (error: Exception) {
+                                            failedReasons[index] = error.message ?: "写入或校验失败"
+                                            publish(index, TaskStage.FAILED, 0)
+                                            SplitDiagnostics.log(
+                                                "part=$index FAILED: ${error.message ?: error.javaClass.simpleName}",
+                                            )
+                                        }
                                         emitTasks()
                                     }
                                 }
@@ -422,6 +432,19 @@ class PdfRangeSplitter(
                 }
             }
 
+            if (failedReasons.isNotEmpty()) {
+                preserveCompleted = true
+                val completed = results.filterNotNull()
+                val missing = parts.indices.filter { results[it] == null }.map { parts[it] }
+                val first = failedReasons.entries.minByOrNull { it.key }
+                partialError = PdfPartialFailure(
+                    completed = completed,
+                    failedParts = missing,
+                    explanation = "${completed.size} 个文件成功、${missing.size} 个失败：" +
+                        (first?.let { "#${it.key + 1} ${it.value}" } ?: "写入异常"),
+                )
+                throw requireNotNull(partialError)
+            }
             succeeded = true
             results.map { requireNotNull(it) { "拆分结果不完整" } }
         } finally {
