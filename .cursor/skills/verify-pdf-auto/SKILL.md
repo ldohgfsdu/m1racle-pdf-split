@@ -1,16 +1,14 @@
 ---
 name: verify-pdf-auto
-description: "Run bounded PDF Split auto model after changes to src/main/java/com/m1racle/reader/pdfsplit/split/FastPathGuard.kt; source snapshot 52517b6."
+description: "Check PDF Split auto fail-closed parser safety model when touching src/main/java/com/m1racle/reader/pdfsplit/split/FastPathGuard.kt"
 ---
 
-# AUTO parser fail-closed
+# AUTO fail-closed parser
 
-Source mapping: `src/main/java/com/m1racle/reader/pdfsplit/split/FastPathGuard.kt`, originally inspected at commit `52517b655e8b3edcf74ac5e097400784012ca7f4`.
+Mapped source: `src/main/java/com/m1racle/reader/pdfsplit/split/FastPathGuard.kt`. Last synchronized source reference: `52517b655e8b3edcf74ac5e097400784012ca7f4`.
 
-Invariant: Strict parsing is accepted only when xref and painted-content evidence are complete and trustworthy.
+Model: `formal/pdf/specs/PdfAutoParser.tla`. Configuration: `formal/pdf/specs/PdfAutoParser.cfg`. Check from project root: `bash formal/pdf/verify_tlc.sh`. This runs TLC on six models and checks six intentionally defective variants. Also run `python3 tools/formal/verify_models.py` for the independent Python bounded abstractions.
 
-From repository root: `python3 tools/formal/verify_models.py`.
+Read the model's invariant and compare every action with actual Kotlin or release workflow statements. The model is a **design**; a green check does not establish correspondence to Kotlin. Real malformed PDF fixtures and content hash comparison remain necessary.
 
-The command tests the abstract safe design and a deliberately broken control. Both must behave as expected. It does **not** verify compiled Kotlin; rerun domain tests and on-device cases for any source code change. After changes to the mapped file, read the exact diff, update the model if necessary, add regression evidence, then advance the sync commit. Use pstack `/statechart` when actual TLC specs are available; do not mislabel hand-authored Mermaid as TLC output.
-
-Known limitations: Current code contains appropriate gates; still requires hostile PDF fixture evidence.
+For user flow diagrams use Cursor pstack `/statechart` on the TLA+ model and its view in `formal/pdf/views/` where present; CI runs the official renderer and uploads charts. After product changes, repeat the Kotlin tests, device regressions and model checks before advancing the synchronized code commit. Use `/maintain-formal-verification-skill` after changes that invalidate the mapping.

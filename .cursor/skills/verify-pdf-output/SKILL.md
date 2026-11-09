@@ -1,16 +1,14 @@
 ---
 name: verify-pdf-output
-description: "Run bounded PDF Split output model after changes to src/main/java/com/m1racle/reader/pdfsplit/split/SafOutputDirectory.kt; source snapshot 52517b6."
+description: "Check PDF Split saf output naming safety model when touching src/main/java/com/m1racle/reader/pdfsplit/split/SafOutputDirectory.kt"
 ---
 
-# SAF output naming and listing
+# SAF output naming
 
-Source mapping: `src/main/java/com/m1racle/reader/pdfsplit/split/SafOutputDirectory.kt`, originally inspected at commit `52517b655e8b3edcf74ac5e097400784012ca7f4`.
+Mapped source: `src/main/java/com/m1racle/reader/pdfsplit/split/SafOutputDirectory.kt`. Last synchronized source reference: `52517b655e8b3edcf74ac5e097400784012ca7f4`.
 
-Invariant: A failed directory listing must not authorize a write; actual names must be shown after provider rename.
+Model: `formal/pdf/specs/PdfOutputNaming.tla`. Configuration: `formal/pdf/specs/PdfOutputNaming.cfg`. Check from project root: `bash formal/pdf/verify_tlc.sh`. This runs TLC on six models and checks six intentionally defective variants. Also run `python3 tools/formal/verify_models.py` for the independent Python bounded abstractions.
 
-From repository root: `python3 tools/formal/verify_models.py`.
+Read the model's invariant and compare every action with actual Kotlin or release workflow statements. The model is a **design**; a green check does not establish correspondence to Kotlin. Provider renaming and directory-listing errors need device injection.
 
-The command tests the abstract safe design and a deliberately broken control. Both must behave as expected. It does **not** verify compiled Kotlin; rerun domain tests and on-device cases for any source code change. After changes to the mapped file, read the exact diff, update the model if necessary, add regression evidence, then advance the sync commit. Use pstack `/statechart` when actual TLC specs are available; do not mislabel hand-authored Mermaid as TLC output.
-
-Known limitations: Existing implementation can swallow listing errors; work remains to bind the model to code.
+For user flow diagrams use Cursor pstack `/statechart` on the TLA+ model and its view in `formal/pdf/views/` where present; CI runs the official renderer and uploads charts. After product changes, repeat the Kotlin tests, device regressions and model checks before advancing the synchronized code commit. Use `/maintain-formal-verification-skill` after changes that invalidate the mapping.

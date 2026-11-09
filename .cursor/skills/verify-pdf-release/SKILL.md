@@ -1,16 +1,14 @@
 ---
 name: verify-pdf-release
-description: "Run bounded PDF Split release model after changes to .github/workflows/android-verify-publish.yml; source snapshot 52517b6."
+description: "Check PDF Split release publication safety model when touching .github/workflows/android-verify-publish.yml"
 ---
 
-# Verified release publication
+# Release publication
 
-Source mapping: `.github/workflows/android-verify-publish.yml`, originally inspected at commit `52517b655e8b3edcf74ac5e097400784012ca7f4`.
+Mapped source: `.github/workflows/android-verify-publish.yml`. Last synchronized source reference: `52517b655e8b3edcf74ac5e097400784012ca7f4`.
 
-Invariant: No public release exists before APK, checksum and signer are validated from remote download.
+Model: `formal/pdf/specs/PdfReleasePublication.tla`. Configuration: `formal/pdf/specs/PdfReleasePublication.cfg`. Check from project root: `bash formal/pdf/verify_tlc.sh`. This runs TLC on six models and checks six intentionally defective variants. Also run `python3 tools/formal/verify_models.py` for the independent Python bounded abstractions.
 
-From repository root: `python3 tools/formal/verify_models.py`.
+Read the model's invariant and compare every action with actual Kotlin or release workflow statements. The model is a **design**; a green check does not establish correspondence to Kotlin. A real tagged draft publication has not yet been exercised.
 
-The command tests the abstract safe design and a deliberately broken control. Both must behave as expected. It does **not** verify compiled Kotlin; rerun domain tests and on-device cases for any source code change. After changes to the mapped file, read the exact diff, update the model if necessary, add regression evidence, then advance the sync commit. Use pstack `/statechart` when actual TLC specs are available; do not mislabel hand-authored Mermaid as TLC output.
-
-Known limitations: CI YAML is structural evidence; execute a controlled draft test before claiming release-path acceptance.
+For user flow diagrams use Cursor pstack `/statechart` on the TLA+ model and its view in `formal/pdf/views/` where present; CI runs the official renderer and uploads charts. After product changes, repeat the Kotlin tests, device regressions and model checks before advancing the synchronized code commit. Use `/maintain-formal-verification-skill` after changes that invalidate the mapping.
