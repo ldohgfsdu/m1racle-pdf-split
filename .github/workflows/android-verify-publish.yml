@@ -85,8 +85,10 @@ jobs:
           path: ${{ runner.temp }}/pdf-statecharts/
           if-no-files-found: error
           retention-days: 30
-      - name: Validate local release script syntax
-        run: bash -n scripts/release.sh
+      - name: Validate local release script safety and mutation controls
+        run: |
+          bash -n scripts/release.sh
+          python3 tools/formal/test_release_path.py
       - name: Publish lint artifacts for follow-up
         if: always()
         uses: actions/upload-artifact@v4

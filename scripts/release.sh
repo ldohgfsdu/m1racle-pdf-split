@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键发版：构建 release → 校验签名指纹 → 哈希 → 不可变 Tag → API 发布 → 上传 → 回读校验。
+# 一键发版：单测 + 签名构建 → 哈希 → 不可变 Tag → 草稿 Release → 上传 → 回读校验 → 公开。
 #
 # 设计原则：任何一步校验失败即中止（fail-closed），绝不"先发出去再说"。
 #
@@ -216,10 +216,15 @@ else
   ok "Tag $TAG 未被占用"
 fi
 
-# 3. 构建 release（绝不出 debug）
-log "构建 release…"
+# 3. 与 GitHub Actions 相同的模型门禁；不能通过本地脚本绕开
+log "执行六个有界状态模型及 TLA+/TLC 负向验证…"
+"$PY" tools/formal/verify_models.py || die "有界模型验证失败"
+bash formal/pdf/verify_tlc.sh || die "TLA+/TLC 验证失败"
+
+# 4. 构建 release（绝不出 debug，先跑单测和 lint）
+log "执行单测、lint 和正式签名构建…"
 "${JAVA_HOME:+$JAVA_HOME/bin/}java" -classpath "gradle/wrapper/gradle-wrapper.jar" \
-  org.gradle.wrapper.GradleWrapperMain clean assembleRelease --offline --console=plain \
+  org.gradle.wrapper.GradleWrapperMain clean testDebugUnitTest lintDebug assembleRelease --offline --console=plain \
   | tail -5 || die "构建失败"
 APK="$(ls build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
 [ -n "$APK" ] || die "找不到 release APK（是否被签名门禁拦下？）"
@@ -267,11 +272,13 @@ ok "Tag $TAG → $HEAD_SHA（远端已确认）"
 BODY=""
 [ -n "$NOTES_FILE" ] && [ -f "$NOTES_FILE" ] && BODY="$(cat "$NOTES_FILE")"
 PAYLOAD="$(mktemp)"
-jgetpy "import json,sys,io;io.open(sys.argv[1],'w',encoding='utf-8').write(json.dumps({'tag_name':sys.argv[2],'name':sys.argv[3],'body':io.open(sys.argv[4],encoding='utf-8').read() if sys.argv[4] else '','prerelease':sys.argv[5]=='true','draft':False},ensure_ascii=False))" \
+jgetpy "import json,sys,io;io.open(sys.argv[1],'w',encoding='utf-8').write(json.dumps({'tag_name':sys.argv[2],'name':sys.argv[3],'body':io.open(sys.argv[4],encoding='utf-8').read() if sys.argv[4] else '','prerelease':sys.argv[5]=='true','draft':True},ensure_ascii=False))" \
   "$PAYLOAD" "$TAG" "M1racle PDF Split $VERSION" "${NOTES_FILE:-}" "$PRERELEASE"
 RELEASE_JSON="$(api POST "/repos/$REPO_SLUG/releases" --data-binary @"$PAYLOAD")"
 RELEASE_ID="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['id'])" "$RELEASE_JSON")"
-ok "Release 已创建 id=$RELEASE_ID（prerelease=$PRERELEASE）"
+DRAFT_FLAG="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['draft'])" "$RELEASE_JSON")"
+[ "$DRAFT_FLAG" = "True" ] || die "创建的 Release 不是草稿，拒绝上传"
+ok "Draft Release 已创建 id=$RELEASE_ID（仅校验后公开）"
 
 # 6. 上传附件
 APK_DIR="$(cd "$(dirname "$APK")" && pwd)"; APK_NAME="$(basename "$APK")"
@@ -284,22 +291,41 @@ for f in "$APK_NAME" "$APK_NAME.sha256"; do
 done
 ok "附件已上传"
 
-# 7. 上传后回读：尺寸、哈希、签名、tag 指向
+# 7. 草稿上传后回读：两个附件名称/内容、哈希、签名和 tag 指向
 TMPDIR_DL="$(mktemp -d)"
 ASSETS_JSON="$(api GET "/repos/$REPO_SLUG/releases/$RELEASE_ID/assets")"
-ASSET_ID="$(jgetpy "import json,sys;print([a['id'] for a in json.loads(sys.argv[1]) if a['name']==sys.argv[2]][0])" "$ASSETS_JSON" "$APK_NAME")"
-curl -sSL --fail --max-time 600 -o "$TMPDIR_DL/$APK_NAME" \
-  -H "Authorization: Bearer $TOKEN" -H "Accept: application/octet-stream" \
-  "$API/repos/$REPO_SLUG/releases/assets/$ASSET_ID" || die "回读下载失败"
+ASSET_SET_OK="$(jgetpy "import json,sys;a=json.loads(sys.argv[1]);names=[x['name'] for x in a];wanted={sys.argv[2],sys.argv[2]+'.sha256'};print(int(len(names)==2 and set(names)==wanted))" "$ASSETS_JSON" "$APK_NAME")"
+[ "$ASSET_SET_OK" = "1" ] || die "草稿附件集合异常，期望恰好 1 个 APK 和 1 个 SHA-256"
+for asset in "$APK_NAME" "$APK_NAME.sha256"; do
+  ASSET_ID="$(jgetpy "import json,sys;print([a['id'] for a in json.loads(sys.argv[1]) if a['name']==sys.argv[2]][0])" "$ASSETS_JSON" "$asset")"
+  curl -sSL --fail --max-time 600 -o "$TMPDIR_DL/$asset" \
+    -H "Authorization: Bearer $TOKEN" -H "Accept: application/octet-stream" \
+    "$API/repos/$REPO_SLUG/releases/assets/$ASSET_ID" || die "远端附件回读失败: $asset"
+done
+cmp -s "$APK_DIR/$APK_NAME.sha256" "$TMPDIR_DL/$APK_NAME.sha256" \
+  || die "远端 .sha256 附件与本地不一致"
+( cd "$TMPDIR_DL" && sha256sum --check "$APK_NAME.sha256" ) \
+  || die "远端 APK 不符合远端 SHA-256 文件"
 LOCAL_HASH="$(cut -d' ' -f1 < "$APK_DIR/$APK_NAME.sha256")"
 REMOTE_HASH="$(sha256sum "$TMPDIR_DL/$APK_NAME" | cut -d' ' -f1)"
 [ "$LOCAL_HASH" = "$REMOTE_HASH" ] || die "回读哈希不一致：本地 $LOCAL_HASH / 远端 $REMOTE_HASH"
-ok "回读哈希一致 $REMOTE_HASH"
+ok "两个附件回读成功，APK 哈希一致 $REMOTE_HASH"
 verify_signature "$TMPDIR_DL/$APK_NAME"
 POST_TAG_SHA="$(resolve_remote_tag_commit "$TAG")" \
   || die "发版后解析远端 tag 失败 —— 不按通过处理"
 [ "$POST_TAG_SHA" = "$HEAD_SHA" ] || die "Tag 在发版过程中被移动！"
-ok "Tag 仍指向 $HEAD_SHA"
+
+# 8. 前述任何检查失败都必须停在 draft；只有全部通过才公开
+PUBLIC_JSON="$(api PATCH "/repos/$REPO_SLUG/releases/$RELEASE_ID" --data-binary '{"draft":false}')"
+PUBLISHED="$(jgetpy "import json,sys;d=json.loads(sys.argv[1]);print(int(d['draft']==False and d.get('published_at') is not None))" "$PUBLIC_JSON")"
+[ "$PUBLISHED" = "1" ] || die "公开 Release 未得到确认，检查草稿状态"
+FINAL_JSON="$(api GET "/repos/$REPO_SLUG/releases/$RELEASE_ID")"
+FINAL_OK="$(jgetpy "import json,sys;d=json.loads(sys.argv[1]);print(int(d['draft']==False and d.get('published_at') is not None))" "$FINAL_JSON")"
+[ "$FINAL_OK" = "1" ] || die "回读正式 Release 状态失败"
+FINAL_TAG_SHA="$(resolve_remote_tag_commit "$TAG")" \
+  || die "公开后无法解析 Tag"
+[ "$FINAL_TAG_SHA" = "$HEAD_SHA" ] || die "公开后 Tag 指向变化"
+ok "远端 Tag 未变化，Release 已正式公开"
 
 cat <<EOF
 
