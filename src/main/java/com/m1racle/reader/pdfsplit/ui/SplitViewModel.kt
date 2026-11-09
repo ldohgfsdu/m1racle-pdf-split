@@ -157,13 +157,14 @@ data class SplitUiState(
     val blockedReason: String?
         get() = when {
             run.phase == RunPhase.RUNNING -> null
+            run.phase == RunPhase.DONE -> "已完成；修改参数后可重新拆分"
             source == null -> "请先选择 PDF"
             preview.parts.isEmpty() -> when (mode) {
                 SplitMode.PAGES -> "请填写页码，例如 1-50"
                 SplitMode.FIXED_SIZE -> "请填写每份页数"
                 SplitMode.OUTLINE -> "请先读取目录并勾选章节"
             }
-            preview.errors.isNotEmpty() -> "第 ${preview.errors.first().line} 行有错误"
+            preview.errors.isNotEmpty() -> "第 ${preview.errors.first().line} 行：${preview.errors.first().message}"
             outputTreeUri == null -> "请先选择输出目录"
             else -> null
         }
@@ -172,6 +173,8 @@ data class SplitUiState(
         get() = blockedReason == null &&
             preview.parts.isNotEmpty() &&
             run.phase != RunPhase.RUNNING &&
+            run.phase != RunPhase.DONE &&
+            !preview.blocked &&
             !cleaningUp
 }
 
