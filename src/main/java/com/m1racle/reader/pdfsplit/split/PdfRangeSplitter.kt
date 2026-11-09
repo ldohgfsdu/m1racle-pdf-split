@@ -453,16 +453,29 @@ class PdfRangeSplitter(
             // a non-cancellable context so it cannot be cut short by the very
             // cancellation that triggered it.
             withContext(NonCancellable) {
+                var undeleted = 0
                 if (!succeeded) {
+                    val keep: Set<Uri> = if (preserveCompleted) {
+                        results.filterNotNull().mapTo(HashSet()) { it.uri }
+                    } else {
+                        emptySet()
+                    }
                     synchronized(createdUris) {
-                        createdUris.forEach { uri ->
-                            runCatching {
+                        createdUris.filterNot { it in keep }.forEach { uri ->
+                            val removed = runCatching {
                                 DocumentsContract.deleteDocument(appContext.contentResolver, uri)
-                            }
+                            }.getOrDefault(false)
+                            if (!removed) undeleted += 1
                         }
                     }
                 }
-                staged?.takeIf { it.temporary }?.file?.delete()
+                if (staged?.temporary == true && staged.file.exists() && !staged.file.delete()) {
+                    SplitDiagnostics.log("source staging cleanup failed")
+                }
+                partialError?.cleanupFailures = undeleted
+                if (undeleted > 0 && partialError == null) {
+                    throw PdfSplitFailure("清理失败：有 $undeleted 个输出文件未删除；请检查保存目录")
+                }
             }
             SplitDiagnostics.log(
                 "run end totalMs=${SystemClock.elapsedRealtime() - runStart} " +
