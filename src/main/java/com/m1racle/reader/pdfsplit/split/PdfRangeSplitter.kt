@@ -399,7 +399,7 @@ class PdfRangeSplitter(
                                                 onCreate = { created -> createdUris.add(created) },
                                             )
                                             results[index] = SplitOutput(
-                                                displayName = part.outputName,
+                                                displayName = actualDocumentName(uri),
                                                 uri = uri,
                                                 pageCount = part.pageCount,
                                                 startPage1 = part.startPage1,
@@ -674,6 +674,19 @@ class PdfRangeSplitter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** The provider may rename on collision after the directory was listed.
+     * Show the real persisted name, never a speculative planned name.
+     */
+    private fun actualDocumentName(uri: Uri): String {
+        val resolver = appContext.contentResolver
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        val value = resolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        return value?.takeIf { it.isNotBlank() }
+            ?: throw PdfSplitFailure("无法确认输出文件名，请检查保存目录")
     }
 
     private fun createOutputDocument(outputTreeUri: Uri, displayName: String): Uri {
