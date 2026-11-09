@@ -42,3 +42,5 @@ object SafOutputDirectory {
                 throw IOException("无法读取保存目录，请检查权限或重新选择", error)
             }
         }
+
+}
