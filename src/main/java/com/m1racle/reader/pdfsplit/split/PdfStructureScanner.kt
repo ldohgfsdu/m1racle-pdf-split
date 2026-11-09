@@ -33,6 +33,9 @@ internal object PdfStructureScanner {
     /** Upper bound on random seeks used to verify object headers. */
     private const val MAX_VERIFIED_ENTRIES = 20_000
 
+    /** How many `/Prev` generations are followed before giving up. */
+    private const val MAX_PREV_DEPTH = 16
+
     /** Enough bytes to see `123 0 obj` after a stray newline or two. */
     private const val HEADER_PROBE_BYTES = 48
 
@@ -42,6 +45,8 @@ internal object PdfStructureScanner {
     private val LENGTH_PATTERN = Regex("/Length\\s+(\\d{1,9})(?!\\s+\\d+\\s+R)")
     private val W_PATTERN = Regex("/W\\s*\\[\\s*(\\d+)\\s+(\\d+)\\s+(\\d+)\\s*]")
     private val INDEX_PATTERN = Regex("/Index\\s*\\[([^\\]]*)]")
+    private val SIZE_PATTERN = Regex("/Size\\s+(\\d{1,9})")
+    private val PREV_PATTERN = Regex("/Prev\\s+(\\d{1,12})")
     private val PREDICTOR_PATTERN = Regex("/Predictor\\s+(\\d+)")
     private val COLUMNS_PATTERN = Regex("/Columns\\s+(\\d+)")
 
@@ -100,16 +105,27 @@ internal object PdfStructureScanner {
                 "startxref 指向的位置读不出来",
                 millisSince(started),
             )
+        return followPreviousSections(raf, size, parseAt(raf, startXref, size, head, started), started)
+    }
+
+    /** Dispatches on what sits at [offset]: a classic table or an xref stream. */
+    private fun parseAt(
+        raf: RandomAccessFile,
+        offset: Long,
+        size: Long,
+        head: ByteArray,
+        started: Long,
+    ): XrefReport {
         val headText = String(head, StandardCharsets.ISO_8859_1)
         val trimmed = headText.trimStart()
 
         return when {
-            trimmed.startsWith("xref") -> parseClassicTable(raf, startXref, size, started)
+            trimmed.startsWith("xref") -> parseClassicTable(raf, offset, size, started)
             OBJECT_HEADER_PATTERN.containsMatchIn(trimmed.take(64)) ->
-                parseXrefStream(raf, startXref, size, headText, started)
+                parseXrefStream(raf, offset, size, headText, started)
             else -> XrefReport(
                 fileBytes = size,
-                startXref = startXref,
+                startXref = offset,
                 startXrefValid = false,
                 kind = XrefReport.Kind.UNKNOWN,
                 encrypted = false,
@@ -126,6 +142,85 @@ internal object PdfStructureScanner {
                 scanMs = millisSince(started),
             )
         }
+    }
+
+    /**
+     * Walks the `/Prev` chain and unions older generations into the report.
+     *
+     * Without this, an incrementally updated PDF only ever had its newest table
+     * inspected. A defective entry in an earlier generation then never reached
+     * [XrefReport.badObjectNumbers], and the probing code — seeing no bad numbers
+     * — classified the dangling reference as "never declared", the benign
+     * branch. Incremental updates are how most viewers save annotations and
+     * signatures, so that was not an exotic case.
+     *
+     * The union is deliberately over-inclusive: an object that was repaired in a
+     * later generation still stays on the bad list. Over-inclusion can only cost
+     * a fallback to lenient; under-inclusion would cost artwork.
+     */
+    private fun followPreviousSections(
+        raf: RandomAccessFile,
+        size: Long,
+        top: XrefReport,
+        started: Long,
+    ): XrefReport {
+        var merged = top
+        val visited = mutableSetOf(top.startXref)
+        var current = top
+        var depth = 0
+
+        while (depth < MAX_PREV_DEPTH) {
+            val prev = prevOffset(current, raf, size) ?: break
+            if (prev <= 0L || prev >= size || !visited.add(prev)) break
+
+            val head = readAt(raf, prev, 2048)
+                ?: return merged.copy(
+                    startXrefValid = false,
+                    reason = "增量更新链在 /Prev $prev 处读不出来，坏对象清单不完整",
+                    scanMs = millisSince(started),
+                )
+            current = parseAt(raf, prev, size, head, started)
+            if (!current.startXrefValid || current.inspectedEntries == 0) {
+                // An older generation we cannot read means the bad-object list is
+                // incomplete. Say so in a way the gate treats as "do not trust
+                // this scan" rather than quietly keeping what we have.
+                return merged.copy(
+                    startXrefValid = false,
+                    hasPrev = true,
+                    reason = "增量更新 /Prev 段解析失败：${current.reason}",
+                    scanMs = millisSince(started),
+                )
+            }
+            merged = merge(merged, current)
+            depth++
+        }
+
+        return merged.copy(scanMs = millisSince(started))
+    }
+
+    private fun merge(newer: XrefReport, older: XrefReport): XrefReport = newer.copy(
+        declaredEntries = newer.declaredEntries + older.declaredEntries,
+        inspectedEntries = newer.inspectedEntries + older.inspectedEntries,
+        inUseEntries = newer.inUseEntries + older.inUseEntries,
+        zeroOffsetEntries = newer.zeroOffsetEntries + older.zeroOffsetEntries,
+        badHeaderEntries = newer.badHeaderEntries + older.badHeaderEntries,
+        objectStreamEntries = newer.objectStreamEntries + older.objectStreamEntries,
+        unverifiedEntries = newer.unverifiedEntries + older.unverifiedEntries,
+        encrypted = newer.encrypted || older.encrypted,
+        hasPrev = true,
+        badObjectNumbers = (newer.badObjectNumbers + older.badObjectNumbers).distinct().sorted(),
+    )
+
+    /** `/Prev` of the section at [report].startXref, read lazily from the file. */
+    private fun prevOffset(report: XrefReport, raf: RandomAccessFile, size: Long): Long? {
+        if (!report.startXrefValid || report.startXref <= 0L) return null
+        val window = minOf(size - report.startXref, TABLE_WINDOW.toLong()).toInt()
+        if (window <= 0) return null
+        val text = String(
+            readAt(raf, report.startXref, window) ?: return null,
+            StandardCharsets.ISO_8859_1,
+        )
+        return PREV_PATTERN.find(text)?.groupValues?.get(1)?.toLongOrNull()
     }
 
     // ── Classic table ───────────────────────────────────────────────────────
@@ -321,8 +416,20 @@ internal object PdfStructureScanner {
         )
     }
 
+    /**
+     * `/Index` ranges, defaulting to `[0 Size]` when the key is absent.
+     *
+     * A missing `/Index` is legal and means exactly that (PDF 32000-1 §7.5.8.2).
+     * Returning an empty list here made single-section xref streams — the common
+     * case for viewers that write one — parse as "0 entries", which both hides
+     * defects and pushes healthy files off the fast path.
+     */
     private fun parseIndex(dict: String): List<Pair<Int, Int>> {
-        val raw = INDEX_PATTERN.find(dict)?.groupValues?.get(1) ?: return emptyList()
+        val raw = INDEX_PATTERN.find(dict)?.groupValues?.get(1)
+        if (raw == null) {
+            val size = SIZE_PATTERN.find(dict)?.groupValues?.get(1)?.toIntOrNull() ?: return emptyList()
+            return if (size > 0) listOf(0 to size) else emptyList()
+        }
         val numbers = raw.split(Regex("[\\s,]+")).mapNotNull { it.trim().toIntOrNull() }
         if (numbers.size < 2) return emptyList()
         return numbers.chunked(2).mapNotNull { pair ->

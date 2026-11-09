@@ -4,6 +4,7 @@
 # 设计原则：任何一步校验失败即中止（fail-closed），绝不"先发出去再说"。
 #
 #   ./scripts/release.sh --version 1.0.1 --notes docs/release-notes-1.0.1.md [--prerelease]
+#   ./scripts/release.sh --version 1.0.1 --notes … --dry-run      # 全流程演练，不发出去
 #   ./scripts/release.sh --verify-only path/to/app.apk
 #
 # 依赖：JDK 17+、Android SDK（aapt2 / apksigner / zipalign）、curl、python3、git。
@@ -18,6 +19,7 @@ TAG=""
 VERSION=""
 NOTES_FILE=""
 PRERELEASE="false"
+DRY_RUN="false"
 VERIFY_ONLY=""
 BUILD_TOOLS_VERSION="${BUILD_TOOLS_VERSION:-36.0.0}"
 # 预期签名身份。换证书时必须显式改这里，否则脚本拒绝发版。
@@ -37,6 +39,7 @@ while [ $# -gt 0 ]; do
     --version)    VERSION="${2:-}"; shift 2 ;;
     --notes)      NOTES_FILE="${2:-}"; shift 2 ;;
     --prerelease) PRERELEASE="true"; shift ;;
+    --dry-run)    DRY_RUN="true"; shift ;;
     --verify-only) VERIFY_ONLY="${2:-}"; shift 2 ;;
     -h|--help)    usage ;;
     *) die "未知参数: $1" ;;
@@ -107,6 +110,25 @@ PY="$(have python3 && echo python3 || (have python && echo python))"
 [ -n "$PY" ] || die "缺少 python（用于 JSON 处理）"
 jgetpy() { "$PY" -c "$@"; }
 
+# 把远端 tag ref 解析成它指向的 commit。
+# annotated tag 的 refs/tags/*.object.sha 是 **tag 对象**的 SHA，不是 commit：
+# 直接拿它跟 HEAD 比，只要用的是 `git tag -a` 就必然不相等 —— 这曾经让发版在
+# tag 推送成功后误判"远端 tag 指向错误"而中止。这里显式解引用到 commit。
+resolve_remote_tag_commit() {
+  local tag="$1" ref_json obj_type obj_sha
+  ref_json="$(api GET "/repos/$REPO_SLUG/git/ref/tags/$tag")" || return 1
+  obj_type="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['object']['type'])" "$ref_json")" || return 1
+  obj_sha="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['object']['sha'])" "$ref_json")" || return 1
+  case "$obj_type" in
+    commit) printf '%s' "$obj_sha" ;;
+    tag)
+      api GET "/repos/$REPO_SLUG/git/tags/$obj_sha" \
+        | jgetpy "import json,sys;d=json.load(sys.stdin);assert d['object']['type']=='commit',d['object']['type'];print(d['object']['sha'])" \
+        || return 1 ;;
+    *) printf 'unknown object type: %s' "$obj_type" >&2; return 1 ;;
+  esac
+}
+
 # ── 模式一：只校验某个 APK ───────────────────────────────────────────────────
 if [ -n "$VERIFY_ONLY" ]; then
   [ -f "$VERIFY_ONLY" ] || die "文件不存在: $VERIFY_ONLY"
@@ -137,18 +159,38 @@ log "仓库 $REPO_SLUG，目标版本 $TAG，预发布=$PRERELEASE"
 
 # 1. 工作树必须干净：避免把未提交的 WIP 打进release
 if [ -n "$(git status --porcelain)" ]; then
-  die "工作树不干净，先提交或暂存：
+  if [ "$DRY_RUN" = "true" ]; then
+    warn "工作树不干净（演练模式只提示）：
 $(git status --porcelain | head -20)"
+  else
+    die "工作树不干净，先提交或暂存：
+$(git status --porcelain | head -20)"
+  fi
 fi
-ok "工作树干净"
+ok "工作树检查通过"
 
 # 2. Tag 不可变：已存在即拒绝，不覆盖、不移动
 if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-  die "本地已存在 tag $TAG —— Tag 不可变，请提升版本号"
+  if [ "$DRY_RUN" = "true" ]; then
+    warn "本地已存在 tag $TAG（演练模式只提示；正式发版会中止）"
+  else
+    die "本地已存在 tag $TAG —— Tag 不可变，请提升版本号"
+  fi
 fi
-if git ls-remote --exit-code --tags github "refs/tags/$TAG" >/dev/null 2>&1; then
-  die "远端已存在 tag $TAG —— Tag 不可变，请提升版本号"
-fi
+# git ls-remote --exit-code 的三态必须分开处理：0=存在，2=确实没有，其他=查询本身失败。
+# 早前写法把"查询失败"和"不存在"都当成不存在，代理抽风时会直接放行到后面。
+ls_rc=0
+ls_out="$(git ls-remote --exit-code --tags github "refs/tags/$TAG" 2>&1)" || ls_rc=$?
+case "$ls_rc" in
+  0) if [ "$DRY_RUN" = "true" ]; then
+       warn "远端已存在 tag $TAG（演练模式只提示；正式发版会中止）"
+     else
+       die "远端已存在 tag $TAG —— Tag 不可变，请提升版本号"
+     fi ;;
+  2) : ;;
+  *) die "查询远端 tag 失败（git ls-remote rc=$ls_rc）：
+$ls_out" ;;
+esac
 ok "Tag $TAG 未被占用"
 
 # 3. 构建 release（绝不出 debug）
@@ -164,6 +206,24 @@ verify_identity "$APK" "$VERSION"
 verify_signature "$APK"
 write_checksum "$APK"
 
+# ── 演练出口：到这里所有只读校验都跑完了，后面的写操作一律不执行 ─────────────
+if [ "$DRY_RUN" = "true" ]; then
+  cat <<EOF
+
+──────────────── 演练结束（未发版）────────────────
+仓库          https://github.com/$REPO_SLUG
+将会打的 tag  $TAG  →  $(git rev-parse HEAD)
+版本          $VERSION
+APK           $(basename "$APK") ($(wc -c < "$APK") B)
+SHA-256       $(cut -d' ' -f1 < "$APK.sha256")
+证书指纹      $EXPECTED_CERT_SHA256
+预发布        $PRERELEASE
+未执行        本地 tag、推送 tag、创建 Release、上传附件
+──────────────────────────────────────────────────
+EOF
+  exit 0
+fi
+
 # 4. 提交并创建不可变 tag
 HEAD_SHA="$(git rev-parse HEAD)"
 git tag -a "$TAG" -m "M1racle PDF Split $VERSION" || die "打 tag 失败"
@@ -175,7 +235,8 @@ for i in 1 2 3 4 5; do
   [ "$i" = "5" ] && die "推送 tag 连续失败，最后一次错误：
 $push_err"
 done
-REMOTE_TAG_SHA="$(api GET "/repos/$REPO_SLUG/git/ref/tags/$TAG" | jgetpy "import json,sys;print(json.load(sys.stdin)['object']['sha'])")"
+REMOTE_TAG_SHA="$(resolve_remote_tag_commit "$TAG")" \
+  || die "解析远端 tag $TAG 指向失败（网络或 API 异常）—— 不按通过处理"
 [ "$REMOTE_TAG_SHA" = "$HEAD_SHA" ] || die "远端 tag 指向 $REMOTE_TAG_SHA，期望 $HEAD_SHA"
 ok "Tag $TAG → $HEAD_SHA（远端已确认）"
 
@@ -212,7 +273,8 @@ REMOTE_HASH="$(sha256sum "$TMPDIR_DL/$APK_NAME" | cut -d' ' -f1)"
 [ "$LOCAL_HASH" = "$REMOTE_HASH" ] || die "回读哈希不一致：本地 $LOCAL_HASH / 远端 $REMOTE_HASH"
 ok "回读哈希一致 $REMOTE_HASH"
 verify_signature "$TMPDIR_DL/$APK_NAME"
-POST_TAG_SHA="$(api GET "/repos/$REPO_SLUG/git/ref/tags/$TAG" | jgetpy "import json,sys;print(json.load(sys.stdin)['object']['sha'])")"
+POST_TAG_SHA="$(resolve_remote_tag_commit "$TAG")" \
+  || die "发版后解析远端 tag 失败 —— 不按通过处理"
 [ "$POST_TAG_SHA" = "$HEAD_SHA" ] || die "Tag 在发版过程中被移动！"
 ok "Tag 仍指向 $HEAD_SHA"
 

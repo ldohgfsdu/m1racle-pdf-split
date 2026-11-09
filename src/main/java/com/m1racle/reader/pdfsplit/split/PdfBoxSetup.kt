@@ -107,14 +107,6 @@ internal object PdfBoxSetup {
     private const val MAX_CONTENT_SCAN = 1 shl 20
 
     /**
-     * `/Name Do` — an XObject actually painted onto the page. Whether a name is
-     * drawn is what separates a harmless dangling reference from a missing
-     * picture, so the pre-flight check has to read the content stream, not just
-     * the resource dictionary.
-     */
-    private val DRAWN_NAME_PATTERN = Regex("/([A-Za-z0-9_.+#-]{1,64})\\s+Do\\b")
-
-    /**
      * Resource categories whose entries are resolved on the fast path. A page
      * whose artwork lives behind a defective object shows up here, which is the
      * one failure mode a fast parse can hide silently.
@@ -207,6 +199,11 @@ internal object PdfBoxSetup {
         val xref = runCatching { PdfStructureScanner.scan(file) }.getOrNull()
         val scanMs = SystemClock.elapsedRealtime() - scanStarted
 
+        // A missing or unreadable scan is not "no bad objects" — it is "no idea".
+        // The probe still runs, but every unresolved reference is then treated as
+        // fatal instead of being assumed merely dangling.
+        val veto = FastPathGuard.xrefVeto(xref)
+
         var strictFailure: String? = null
         val strictStarted = SystemClock.elapsedRealtime()
         val strictDocument = try {
@@ -219,7 +216,11 @@ internal object PdfBoxSetup {
 
         if (strictDocument != null) {
             val probe = try {
-                probePageTree(strictDocument, xref?.badObjectNumbers?.toSet() ?: emptySet())
+                probePageTree(
+                    document = strictDocument,
+                    badObjects = xref?.badObjectNumbers?.toSet() ?: emptySet(),
+                    canVet = veto == null,
+                )
             } catch (failure: Throwable) {
                 PageTreeProbe(describe(failure), 0, emptyList())
             }
@@ -237,6 +238,9 @@ internal object PdfBoxSetup {
                             append(" zeroOffset=").append(xref.zeroOffsetEntries)
                             append(" badHeader=").append(xref.badHeaderEntries)
                             append(" entries=").append(xref.inspectedEntries)
+                        }
+                        if (veto != null) {
+                            append(" unvetted=").append(veto)
                         }
                         if (probe.softMisses > 0) {
                             append(" softMiss=").append(probe.softMisses)
@@ -288,12 +292,16 @@ internal object PdfBoxSetup {
      * ever draws — A1 proved the page renders byte-identically either way
      * (2026-11-09, docs/a1-result-20261109.md).
      */
-    internal fun probePageTree(document: PDDocument, badObjects: Set<Int>): PageTreeProbe {
+    internal fun probePageTree(
+        document: PDDocument,
+        badObjects: Set<Int>,
+        canVet: Boolean = true,
+    ): PageTreeProbe {
         val pages = document.pages
         val count = pages.count
         if (count <= 0) return PageTreeProbe("页树为空", 0, emptyList())
 
-        val state = ProbeState(badObjects)
+        val state = ProbeState(badObjects, canVet)
         for (index in 0 until count) {
             inspectPage(pages[index], index, state)
             if (state.fatal != null) break
@@ -312,9 +320,9 @@ internal object PdfBoxSetup {
             return
         }
 
-        // Decoding the content stream is both a integrity check and the only way
+        // Decoding the content stream is both an integrity check and the only way
         // to learn which XObject names this page actually paints.
-        var drawnNames: Set<String> = emptySet()
+        var evidence = DrawingEvidence.UNREAD
         if (contents == null) {
             if (cos.containsKey(COSName.CONTENTS)) {
                 val bad = badReferenceNumber(contentsItem, state)
@@ -326,24 +334,19 @@ internal object PdfBoxSetup {
                     return
                 }
                 state.soft("第 ${index + 1} 页 /Contents")
+            } else {
+                // No /Contents key at all: the page paints nothing, so no XObject
+                // can be drawn by it. That is a sound "nothing drawn", unlike an
+                // unreadable content stream.
+                evidence = DrawingEvidence(emptySet(), complete = true)
             }
         } else {
-            val builder = StringBuilder()
-            for (stream in contentStreams(contents)) {
-                if (builder.length >= MAX_CONTENT_SCAN) break
-                val payload = runCatching {
-                    readStreamText(stream, MAX_CONTENT_SCAN - builder.length)
-                }.getOrElse { failure ->
+            val read = runCatching { readDrawings(contentStreams(contents), MAX_CONTENT_SCAN) }
+                .getOrElse { failure ->
                     state.fail("第 ${index + 1} 页内容流无法解码：${describe(failure)}")
                     return
                 }
-                builder.append(payload)
-            }
-            if (builder.isNotEmpty()) {
-                drawnNames = DRAWN_NAME_PATTERN.findAll(builder)
-                    .map { it.groupValues[1] }
-                    .toSet()
-            }
+            evidence = read
         }
 
         val resources = runCatching { page.resources }.getOrElse { failure ->
@@ -354,9 +357,34 @@ internal object PdfBoxSetup {
         for (category in PAGE_RESOURCE_KEYS) {
             val dictionary = resources.cosObject.getDictionaryObject(category) as? COSDictionary
                 ?: continue
-            inspectResourceDictionary(dictionary, index, category, state, drawnNames, depth = 0)
+            inspectResourceDictionary(dictionary, index, category, state, evidence, depth = 0)
             if (state.fatal != null) return
         }
+    }
+
+    /**
+     * Reads every content stream up to [budget] bytes and turns it into
+     * [DrawingEvidence].
+     *
+     * Hitting the budget is *not* a reason to stop quietly: the evidence is
+     * marked incomplete, and an incomplete reading may never downgrade a broken
+     * XObject to harmless. A page that draws its last image after 1 MiB is
+     * exactly the case this protects.
+     */
+    private fun readDrawings(streams: List<COSStream>, budget: Int): DrawingEvidence {
+        val builder = StringBuilder()
+        var truncated = false
+        for (stream in streams) {
+            val remaining = budget - builder.length
+            if (remaining <= 0) {
+                truncated = true
+                break
+            }
+            val payload = readStreamText(stream, remaining)
+            builder.append(payload)
+            if (payload.length >= remaining) truncated = true
+        }
+        return FastPathGuard.scanDrawings(builder, truncated)
     }
 
     private fun inspectResourceDictionary(
@@ -364,7 +392,7 @@ internal object PdfBoxSetup {
         pageIndex: Int,
         category: COSName,
         state: ProbeState,
-        drawnNames: Set<String>,
+        evidence: DrawingEvidence,
         depth: Int,
     ) {
         for (key in dictionary.keySet()) {
@@ -378,12 +406,21 @@ internal object PdfBoxSetup {
             if (value == null) {
                 val bad = badReferenceNumber(item, state)
                 if (bad != null) {
-                    if (category == COSName.XOBJECT && key.name !in drawnNames) {
-                        // Declared, unresolvable, and never painted: no content
-                        // stream says `/Name Do`, so neither parser turns this
-                        // into pixels. The 988 MB textbook has exactly this case
-                        // on page 15 (`/KSPX1` → 3148) and A1 proved the page
-                        // renders byte-identically under both parsers.
+                    // `severityForUnresolved` is what keeps "unpainted" from
+                    // being concluded out of an incomplete reading: a truncated
+                    // content stream, an unpaired Do operator or an escaped name
+                    // all turn this into a fatal instead of a soft miss.
+                    val severity = FastPathGuard.severityForUnresolved(
+                        isXObject = category == COSName.XOBJECT,
+                        name = key.name,
+                        evidence = evidence,
+                    )
+                    if (severity != MissSeverity.FATAL) {
+                        // Declared, unresolvable, and provably never painted: no
+                        // content stream says `/Name Do`, so neither parser turns
+                        // this into pixels. The 988 MB textbook has exactly this
+                        // case on page 15 (`/KSPX1` → 3148) and A1 proved the
+                        // page renders byte-identically under both parsers.
                         state.soft(
                             "第 ${pageIndex + 1} 页 ${category.name}/$key 引用了坏对象 $bad，但未被绘制",
                         )
@@ -391,7 +428,21 @@ internal object PdfBoxSetup {
                     }
                     state.fail(
                         "第 ${pageIndex + 1} 页 ${category.name}/$key 引用了坏对象 $bad" +
-                            "（宽松解析会重扫找到，严格解析不会）",
+                            if (evidence.complete) {
+                                "（内容流确实绘制了它，严格解析拿不到 = 缺图）"
+                            } else {
+                                "（内容流未能完整读取，无法证明它没被绘制）"
+                            },
+                    )
+                    return
+                }
+                if (!state.canVet) {
+                    // No trustworthy bad-object list: an unresolved reference
+                    // cannot be told apart from "referenced a defective offset",
+                    // so the benign reading must not be assumed.
+                    state.fail(
+                        "第 ${pageIndex + 1} 页 ${category.name}/$key 解析为空，且结构扫描不可用" +
+                            "（无法判断它是否属于坏记录）",
                     )
                     return
                 }
@@ -399,9 +450,10 @@ internal object PdfBoxSetup {
                 continue
             }
 
-            // A Form XObject carries its own resources. One level of nesting is
-            // what real books use; deeper than that is a cycle or a decompression
-            // bomb, neither worth chasing from a pre-flight check.
+            // A Form XObject carries its own resources *and* its own content
+            // stream. Its drawings live there, not on the page, so descending
+            // without reading them would classify anything the form paints as
+            // unpainted — a false negative one level down.
             val stream = value as? COSStream
             if (category == COSName.XOBJECT && stream != null && depth < MAX_FORM_DEPTH) {
                 val subtype = runCatching {
@@ -410,6 +462,11 @@ internal object PdfBoxSetup {
                 if (subtype == COSName.FORM) {
                     val nested = runCatching { PDResources(stream).cosObject }.getOrNull()
                     if (nested != null) {
+                        val formEvidence = FastPathGuard.combine(
+                            evidence,
+                            runCatching { readDrawings(listOf(stream), MAX_CONTENT_SCAN) }
+                                .getOrDefault(DrawingEvidence.UNREAD),
+                        )
                         for (inner in PAGE_RESOURCE_KEYS) {
                             val innerDictionary = nested.getDictionaryObject(inner) as? COSDictionary
                                 ?: continue
@@ -418,7 +475,7 @@ internal object PdfBoxSetup {
                                 pageIndex,
                                 inner,
                                 state,
-                                drawnNames,
+                                formEvidence,
                                 depth + 1,
                             )
                             if (state.fatal != null) return
@@ -466,7 +523,10 @@ internal object PdfBoxSetup {
         return String(sink.toByteArray(), Charsets.ISO_8859_1)
     }
 
-    private class ProbeState(private val badObjects: Set<Int>) {
+    private class ProbeState(
+        private val badObjects: Set<Int>,
+        val canVet: Boolean = true,
+    ) {
         var fatal: String? = null
             private set
 
