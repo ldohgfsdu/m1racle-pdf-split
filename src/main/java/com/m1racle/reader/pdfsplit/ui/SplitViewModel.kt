@@ -692,7 +692,21 @@ class SplitViewModel(
             _state.update { state -> SourceScope.accept(state, generation) { it.copy(preview = quick) } }
             val tree = _state.value.outputTreeUri ?: return@launch
             delay(250)
-            val existing = SafOutputDirectory.listExistingNames(getApplication(), tree)
+            val existing = try {
+                SafOutputDirectory.listExistingNames(getApplication(), tree)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        it.copy(preview = it.preview.copy(
+                            blocked = true,
+                            blockedReason = error.message ?: "无法读取保存目录，请重新选择",
+                        ))
+                    }
+                }
+                return@launch
+            }
             val full = buildPreview(existing = existing, knownFolder = true)
             _state.update { state -> SourceScope.accept(state, generation) { it.copy(preview = full) } }
         }
@@ -952,7 +966,9 @@ class SplitViewModel(
                 _state.update { current ->
                     if (current.sourceGeneration == generation) current.copy(cleaningUp = false) else current
                 }
-                runJob = null
+                if (runJob == kotlinx.coroutines.currentCoroutineContext()[Job]) {
+                    runJob = null
+                }
             }
         }
     }
