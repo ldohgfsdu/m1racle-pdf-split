@@ -106,11 +106,14 @@ object PageRangeParser {
             // Comma-separated ranges are independent output parts, not a filename.
             // Keep the source line on every part/error so the text field can point
             // to the offending line. Empty tokens (trailing commas) are errors.
-            val tokens = if (MULTI_RANGE_SEPARATOR.containsMatchIn(line)) {
-                MULTI_RANGE_SEPARATOR.split(line)
-            } else {
-                listOf(line)
-            }
+            val firstSegment = MULTI_RANGE_SEPARATOR.split(line).first().trim()
+            val isRangeList = MULTI_RANGE_SEPARATOR.containsMatchIn(line) &&
+                (RANGE_ONLY.matches(firstSegment) ||
+                    SINGLE_ONLY.matches(firstSegment) ||
+                    OPEN_END.matches(firstSegment) ||
+                    OPEN_START.matches(firstSegment) ||
+                    INVALID_NUMERIC_RANGE.containsMatchIn(firstSegment))
+            val tokens = if (isRangeList) MULTI_RANGE_SEPARATOR.split(line) else listOf(line)
             tokens.forEach { tokenRaw ->
                 val token = tokenRaw.trim()
                 val rangeFirst = RANGE_FIRST.matchEntire(token)
@@ -195,7 +198,9 @@ object PageRangeParser {
         // Pairing is only safe when both columns have the same length; otherwise
         // the program cannot know which entries are missing.
         val unnamedCount = validEntries.count { it.name == null }
-        val canPairWholeColumn = namePool.size >= 2 && namePool.size == unnamedCount
+        val canPairWholeColumn = namePool.isNotEmpty() &&
+            namePool.size == unnamedCount &&
+            (namePool.size >= 2 || namePool.single().let { it.any(Char::isDigit) && '_' in it })
         var cursor = 0
         var paired = 0
         var renamed = 0
@@ -226,7 +231,7 @@ object PageRangeParser {
         val unused = (namePool.size - cursor).coerceAtLeast(0)
 
         val warnings = buildList {
-            if (namePool.size == 1 && unnamedCount == 1) {
+            if (namePool.size == 1 && unnamedCount == 1 && !canPairWholeColumn) {
                 add("单独一行名称不会自动与页码配对，避免误命名；请写成「1-5 名称」")
             } else if (namePool.isNotEmpty() && !canPairWholeColumn) {
                 add(
