@@ -410,7 +410,11 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(Dimens.innerRadius))
             .background(Palette.inner)
-            .border(1.5.dp, Palette.accent.copy(alpha = 0.75f), RoundedCornerShape(Dimens.innerRadius))
+            .border(
+                1.dp,
+                if (state.preview.errors.isNotEmpty()) Palette.warning else Palette.accent,
+                RoundedCornerShape(Dimens.innerRadius),
+            )
             .padding(14.dp),
     ) {
         Column {
@@ -435,7 +439,7 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
     }
     Spacer(Modifier.height(8.dp))
     Text(
-        text = "每行一段，只用 PDF 物理页序号；可写成「71-86 心肺听诊」，也支持先贴页码列、再贴名称列。",
+        text = "页码示例：1-5、8、12-20；也可换行输入，或粘贴等长的页码列与名称列。",
         fontSize = 11.sp,
         lineHeight = 17.sp,
         color = Palette.textTertiary,
@@ -1318,7 +1322,7 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
         PrimaryActionButton(
             text = when {
                 running -> "取消"
-                state.run.phase == RunPhase.DONE -> "再拆一次"
+                state.run.phase == RunPhase.DONE -> "已完成，修改规则可再拆"
                 else -> "开始拆分"
             },
             onClick = { if (running) vm.cancel() else vm.start() },
