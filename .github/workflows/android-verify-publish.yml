@@ -214,9 +214,11 @@ jobs:
         run: |
           set -euo pipefail
           apk=m1racle-pdf-split-release.apk
+          notes_file="docs/release-notes/$RELEASE_TAG.md"
+          [[ -s "$notes_file" ]] || { echo "::error::Release notes missing: $notes_file"; exit 1; }
           gh release create "$RELEASE_TAG" "$apk" "$apk.sha256" --draft \
             --target "$GITHUB_SHA" --title "M1racle PDF Split $RELEASE_TAG" \
-            --notes "Release passed Gradle tests, signed build, signer continuity and remote asset read-back."
+            --notes-file "$notes_file"
           mkdir -p "$RUNNER_TEMP/readback"
           gh release download "$RELEASE_TAG" --pattern "$apk" --dir "$RUNNER_TEMP/readback"
           gh release download "$RELEASE_TAG" --pattern "$apk.sha256" --dir "$RUNNER_TEMP/readback"
