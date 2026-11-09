@@ -1235,7 +1235,7 @@ private fun PageThumb(label: String, bitmap: Bitmap?) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(Color.White)
                 .border(1.dp, Palette.cardStroke, RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.FillBounds,
+            contentScale = ContentScale.Fit,
         )
     } else {
         Box(
