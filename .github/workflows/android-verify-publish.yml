@@ -49,6 +49,8 @@ jobs:
         run: bash ./gradlew testDebugUnitTest assembleDebug lintDebug --no-daemon --console=plain
       - name: Bounded design models and negative controls (not Kotlin proofs)
         run: python3 tools/formal/verify_models.py
+      - name: Six bounded TLA+ / TLC checks and negative-control mutations
+        run: bash formal/pdf/verify_tlc.sh
       - name: Validate local release script syntax
         run: bash -n scripts/release.sh
       - name: Publish lint artifacts for follow-up
