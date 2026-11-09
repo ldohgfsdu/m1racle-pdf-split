@@ -551,27 +551,36 @@ internal object PdfBoxSetup {
         if (!directory.isDirectory && !directory.mkdirs()) {
             throw IOException("无法创建源文件缓存目录")
         }
-        val target = File(directory, "source-${System.currentTimeMillis()}.pdf")
+        // Unique paths avoid collisions when two probes stage in the same ms.
+        val target = File.createTempFile("source-", ".pdf", directory)
         val totalBytes = runCatching {
             context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
         }.getOrNull()?.takeIf { it > 0 } ?: -1L
-
-        val input = context.contentResolver.openInputStream(uri)
-            ?: throw IOException("无法打开所选 PDF")
-        input.use { source ->
-            FileOutputStream(target).use { sink ->
-                val buffer = ByteArray(COPY_BUFFER_BYTES)
-                var copied = 0L
-                while (true) {
-                    currentCoroutineContext().ensureActive()
-                    val read = source.read(buffer)
-                    if (read < 0) break
-                    sink.write(buffer, 0, read)
-                    copied += read
-                    onProgress(copied, totalBytes)
+        try {
+            val input = context.contentResolver.openInputStream(uri)
+                ?: throw IOException("无法打开所选 PDF")
+            input.use { source ->
+                FileOutputStream(target).use { sink ->
+                    val buffer = ByteArray(COPY_BUFFER_BYTES)
+                    var copied = 0L
+                    while (true) {
+                        currentCoroutineContext().ensureActive()
+                        val read = source.read(buffer)
+                        if (read < 0) break
+                        sink.write(buffer, 0, read)
+                        copied += read
+                        onProgress(copied, totalBytes)
+                    }
+                    sink.flush()
                 }
-                sink.flush()
             }
+        } catch (failed: Throwable) {
+            // Cancellation, stream failure and provider permission loss must not
+            // leave a large partial PDF in the application cache.
+            if (!target.delete() && target.exists()) {
+                SplitDiagnostics.log("staging cleanup failed after copy exception")
+            }
+            throw failed
         }
         return StagedSource(target, temporary = true)
     }

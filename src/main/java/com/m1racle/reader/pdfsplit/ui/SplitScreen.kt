@@ -105,7 +105,8 @@ fun SplitScreen(
                 when {
                     state.run.phase == RunPhase.RUNNING || state.run.tasks.isNotEmpty() ->
                         TaskBoard(state.run)
-                    state.run.phase == RunPhase.DONE -> ResultCard(state, vm)
+                    state.run.phase == RunPhase.DONE ||
+                        (state.run.phase == RunPhase.FAILED && state.run.outputs.isNotEmpty()) -> ResultCard(state, vm)
                     else -> PlanCard(state, planExpanded) { planExpanded = !planExpanded }
                 }
 
@@ -410,7 +411,11 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
             .fillMaxWidth()
             .clip(RoundedCornerShape(Dimens.innerRadius))
             .background(Palette.inner)
-            .border(1.5.dp, Palette.accent.copy(alpha = 0.75f), RoundedCornerShape(Dimens.innerRadius))
+            .border(
+                1.dp,
+                if (state.preview.errors.isNotEmpty()) Palette.warning else Palette.accent,
+                RoundedCornerShape(Dimens.innerRadius),
+            )
             .padding(14.dp),
     ) {
         Column {
@@ -435,7 +440,7 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
     }
     Spacer(Modifier.height(8.dp))
     Text(
-        text = "每行一段，只用 PDF 物理页序号；可写成「71-86 心肺听诊」，也支持先贴页码列、再贴名称列。",
+        text = "页码示例：1-5、8、12-20；也可换行输入，或粘贴等长的页码列与名称列。",
         fontSize = 11.sp,
         lineHeight = 17.sp,
         color = Palette.textTertiary,
@@ -1000,11 +1005,13 @@ private fun TaskRow(task: TaskSnapshot) {
                     TaskStage.CHECKING -> "校验"
                     TaskStage.SAVING -> "写入"
                     TaskStage.DONE -> "完成"
+                    TaskStage.FAILED -> "失败"
                 },
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
                 color = when (task.stage) {
                     TaskStage.DONE -> Palette.accent
+                    TaskStage.FAILED -> Palette.danger
                     TaskStage.QUEUED -> Palette.textTertiary
                     else -> Palette.textSecondary
                 },
@@ -1058,7 +1065,7 @@ private fun ProgressBar(fraction: Float, height: Dp = 6.dp, dimmed: Boolean = fa
 private fun ResultCard(state: SplitUiState, vm: SplitViewModel) {
     val run = state.run
     InfoCard(
-        title = "拆分完成",
+        title = if (run.phase == RunPhase.FAILED) "部分完成（可重试失败项）" else "拆分完成",
         trailing = {
             Box(
                 modifier = Modifier
@@ -1235,7 +1242,7 @@ private fun PageThumb(label: String, bitmap: Bitmap?) {
                 .clip(RoundedCornerShape(8.dp))
                 .background(Color.White)
                 .border(1.dp, Palette.cardStroke, RoundedCornerShape(8.dp)),
-            contentScale = ContentScale.FillBounds,
+            contentScale = ContentScale.Fit,
         )
     } else {
         Box(
@@ -1307,6 +1314,8 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
                 text = when {
                     state.cleaningUp -> "已取消，正在清理未完成的文件…"
                     state.run.phase == RunPhase.DONE -> "已生成 ${state.run.outputs.size} 个文件，可逐项预览"
+                    state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
+                        "已完成 ${state.run.outputs.size} 个，失败 ${state.run.failedParts.size} 个，可单独重试"
                     else -> state.blockedReason
                         ?: "预计生成 ${state.preview.fileCount} 个 PDF"
                 },
@@ -1318,7 +1327,9 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
         PrimaryActionButton(
             text = when {
                 running -> "取消"
-                state.run.phase == RunPhase.DONE -> "再拆一次"
+                state.run.phase == RunPhase.DONE -> "已完成，修改规则可再拆"
+                state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
+                    "重试失败的 ${state.run.failedParts.size} 个"
                 else -> "开始拆分"
             },
             onClick = { if (running) vm.cancel() else vm.start() },

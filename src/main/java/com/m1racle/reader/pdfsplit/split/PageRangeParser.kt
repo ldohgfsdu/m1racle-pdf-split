@@ -75,6 +75,12 @@ object PageRangeParser {
 
     private val RANGE_ONLY = Regex("^\\s*(\\d+)\\s*$SEPARATOR\\s*(\\d+)\\s*\$")
     private val SINGLE_ONLY = Regex("^\\s*(\\d+)\\s*\$")
+    private val OPEN_END = Regex("^\\s*(\\d+)\\s*$SEPARATOR\\s*$")
+    private val OPEN_START = Regex("^\\s*$SEPARATOR\\s*(\\d+)\\s*$")
+    private val MULTI_RANGE_SEPARATOR = Regex("[,，、;；]")
+    private val INVALID_NUMERIC_RANGE = Regex("^\\s*\\d+\\s*$SEPARATOR")
+    private val INVALID_LETTER_RANGE = Regex("^[a-zA-Z]+\\s*$SEPARATOR\\s*[a-zA-Z]+$")
+
     private val RANGE_FIRST = Regex("^\\s*(\\d+)\\s*$SEPARATOR\\s*(\\d+)\\s+(\\S.*)\$")
     private val RANGE_LAST = Regex("^(.+?)\\s+(\\d+)\\s*$SEPARATOR\\s*(\\d+)\\s*\$")
 
@@ -97,34 +103,67 @@ object PageRangeParser {
             val line = raw.trim()
             if (line.isEmpty()) return@forEachIndexed
 
-            val rangeFirst = RANGE_FIRST.matchEntire(line)
-            val rangeLast = RANGE_LAST.matchEntire(line)
-            val rangeOnly = RANGE_ONLY.matchEntire(line)
-            val singleOnly = SINGLE_ONLY.matchEntire(line)
-            when {
-                rangeOnly != null -> entries += Entry(
-                    line = lineNo,
-                    start = rangeOnly.groupValues[1].toIntOrNull() ?: 0,
-                    end = rangeOnly.groupValues[2].toIntOrNull() ?: 0,
-                    name = null,
-                )
-                singleOnly != null -> {
-                    val page = singleOnly.groupValues[1].toIntOrNull() ?: 0
-                    entries += Entry(line = lineNo, start = page, end = page, name = null)
+            // Comma-separated ranges are independent output parts, not a filename.
+            // Keep the source line on every part/error so the text field can point
+            // to the offending line. Empty tokens (trailing commas) are errors.
+            val firstSegment = MULTI_RANGE_SEPARATOR.split(line).first().trim()
+            val isRangeList = MULTI_RANGE_SEPARATOR.containsMatchIn(line) &&
+                (RANGE_ONLY.matches(firstSegment) ||
+                    SINGLE_ONLY.matches(firstSegment) ||
+                    OPEN_END.matches(firstSegment) ||
+                    OPEN_START.matches(firstSegment) ||
+                    INVALID_NUMERIC_RANGE.containsMatchIn(firstSegment))
+            val tokens = if (isRangeList) MULTI_RANGE_SEPARATOR.split(line) else listOf(line)
+            tokens.forEach { tokenRaw ->
+                val token = tokenRaw.trim()
+                val rangeFirst = RANGE_FIRST.matchEntire(token)
+                val rangeLast = RANGE_LAST.matchEntire(token)
+                val rangeOnly = RANGE_ONLY.matchEntire(token)
+                val singleOnly = SINGLE_ONLY.matchEntire(token)
+                val openEnd = OPEN_END.matchEntire(token)
+                val openStart = OPEN_START.matchEntire(token)
+                when {
+                    rangeOnly != null -> entries += Entry(
+                        line = lineNo,
+                        start = rangeOnly.groupValues[1].toIntOrNull() ?: 0,
+                        end = rangeOnly.groupValues[2].toIntOrNull() ?: 0,
+                        name = null,
+                    )
+                    singleOnly != null -> {
+                        val page = singleOnly.groupValues[1].toIntOrNull() ?: 0
+                        entries += Entry(line = lineNo, start = page, end = page, name = null)
+                    }
+                    openEnd != null -> entries += Entry(
+                        line = lineNo,
+                        start = openEnd.groupValues[1].toIntOrNull() ?: 0,
+                        end = pageCount,
+                        name = null,
+                    )
+                    openStart != null -> entries += Entry(
+                        line = lineNo,
+                        start = 1,
+                        end = openStart.groupValues[1].toIntOrNull() ?: 0,
+                        name = null,
+                    )
+                    rangeFirst != null && tokens.size == 1 -> entries += Entry(
+                        line = lineNo,
+                        start = rangeFirst.groupValues[1].toIntOrNull() ?: 0,
+                        end = rangeFirst.groupValues[2].toIntOrNull() ?: 0,
+                        name = rangeFirst.groupValues[3].trim().ifBlank { null },
+                    )
+                    rangeLast != null && tokens.size == 1 -> entries += Entry(
+                        line = lineNo,
+                        start = rangeLast.groupValues[2].toIntOrNull() ?: 0,
+                        end = rangeLast.groupValues[3].toIntOrNull() ?: 0,
+                        name = rangeLast.groupValues[1].trim().ifBlank { null },
+                    )
+                    tokens.size > 1 || token.isEmpty() ||
+                        INVALID_NUMERIC_RANGE.containsMatchIn(token) ||
+                        INVALID_LETTER_RANGE.matches(token) -> {
+                        errors += LineError(lineNo, "无法识别「$token」，示例 1-5、8、12-20 或 3-")
+                    }
+                    else -> namePool += token
                 }
-                rangeFirst != null -> entries += Entry(
-                    line = lineNo,
-                    start = rangeFirst.groupValues[1].toIntOrNull() ?: 0,
-                    end = rangeFirst.groupValues[2].toIntOrNull() ?: 0,
-                    name = rangeFirst.groupValues[3].trim().ifBlank { null },
-                )
-                rangeLast != null -> entries += Entry(
-                    line = lineNo,
-                    start = rangeLast.groupValues[2].toIntOrNull() ?: 0,
-                    end = rangeLast.groupValues[3].toIntOrNull() ?: 0,
-                    name = rangeLast.groupValues[1].trim().ifBlank { null },
-                )
-                else -> namePool += line
             }
         }
 
@@ -159,7 +198,9 @@ object PageRangeParser {
         // Pairing is only safe when both columns have the same length; otherwise
         // the program cannot know which entries are missing.
         val unnamedCount = validEntries.count { it.name == null }
-        val canPairWholeColumn = namePool.isNotEmpty() && namePool.size == unnamedCount
+        val canPairWholeColumn = namePool.isNotEmpty() &&
+            namePool.size == unnamedCount &&
+            (namePool.size >= 2 || namePool.single().let { it.any(Char::isDigit) && '_' in it })
         var cursor = 0
         var paired = 0
         var renamed = 0
@@ -190,7 +231,9 @@ object PageRangeParser {
         val unused = (namePool.size - cursor).coerceAtLeast(0)
 
         val warnings = buildList {
-            if (namePool.isNotEmpty() && !canPairWholeColumn) {
+            if (namePool.size == 1 && unnamedCount == 1 && !canPairWholeColumn) {
+                add("单独一行名称不会自动与页码配对，避免误命名；请写成「1-5 名称」")
+            } else if (namePool.isNotEmpty() && !canPairWholeColumn) {
                 add(
                     "页码 $unnamedCount 个、名称 ${namePool.size} 个，数量不一致，" +
                         "没有自动配对（错配比不配更糟）",

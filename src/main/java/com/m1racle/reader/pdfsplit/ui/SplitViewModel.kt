@@ -20,6 +20,7 @@ import com.m1racle.reader.pdfsplit.split.PdfBoxSetup
 import com.m1racle.reader.pdfsplit.split.PdfChapterDetector
 import com.m1racle.reader.pdfsplit.split.PdfOutlineReader
 import com.m1racle.reader.pdfsplit.split.PdfProbe
+import com.m1racle.reader.pdfsplit.split.PdfPartialFailure
 import com.m1racle.reader.pdfsplit.split.PdfRangeSplitter
 import com.m1racle.reader.pdfsplit.split.SafOutputDirectory
 import com.m1racle.reader.pdfsplit.split.SplitEvent
@@ -70,6 +71,8 @@ data class OutlineUiState(
     val totalForScan: Int = 0,
     val message: String? = null,
     val source: OutlineSource = OutlineSource.NONE,
+    /** Source generation the nodes and selection were read for. */
+    val generation: Long = 0,
 ) {
     val maxDepth: Int get() = nodes.maxOfOrNull { it.depth } ?: 1
 }
@@ -90,6 +93,9 @@ data class PreviewState(
     val notes: List<String> = emptyList(),
     val blocked: Boolean = false,
     val blockedReason: String? = null,
+    /** Source generation and page count the parts were planned against. */
+    val generation: Long = 0,
+    val documentPages: Int = 0,
 ) {
     val fileCount: Int get() = parts.size
     val uncoveredPages: Int get() = uncovered.sumOf { it.count() }
@@ -103,9 +109,12 @@ data class RunState(
     val detail: String = "",
     val tasks: List<TaskSnapshot> = emptyList(),
     val outputs: List<SplitOutput> = emptyList(),
+    val failedParts: List<SplitPart> = emptyList(),
     val finished: Int = 0,
     val total: Int = 0,
     val error: String? = null,
+    /** Source generation this run (or its result) belongs to. */
+    val generation: Long = 0,
 )
 
 /** A written output opened for visual verification: first + last page. */
@@ -120,6 +129,8 @@ data class ResultPreviewState(
 
 data class SplitUiState(
     val mode: SplitMode = SplitMode.PAGES,
+    /** Bumped on every file pick; see [SourceScope]. */
+    val sourceGeneration: Long = 0,
     val source: SourceInfo? = null,
     val loadingSource: Boolean = false,
     val sourceError: String? = null,
@@ -148,13 +159,14 @@ data class SplitUiState(
     val blockedReason: String?
         get() = when {
             run.phase == RunPhase.RUNNING -> null
+            run.phase == RunPhase.DONE -> "已完成；修改参数后可重新拆分"
             source == null -> "请先选择 PDF"
             preview.parts.isEmpty() -> when (mode) {
                 SplitMode.PAGES -> "请填写页码，例如 1-50"
                 SplitMode.FIXED_SIZE -> "请填写每份页数"
                 SplitMode.OUTLINE -> "请先读取目录并勾选章节"
             }
-            preview.errors.isNotEmpty() -> "第 ${preview.errors.first().line} 行有错误"
+            preview.errors.isNotEmpty() -> "第 ${preview.errors.first().line} 行：${preview.errors.first().message}"
             outputTreeUri == null -> "请先选择输出目录"
             else -> null
         }
@@ -163,6 +175,8 @@ data class SplitUiState(
         get() = blockedReason == null &&
             preview.parts.isNotEmpty() &&
             run.phase != RunPhase.RUNNING &&
+            run.phase != RunPhase.DONE &&
+            !preview.blocked &&
             !cleaningUp
 }
 
@@ -176,6 +190,7 @@ class SplitViewModel(
 
     private var previewJob: Job? = null
     private var runJob: Job? = null
+    private var outlineJob: Job? = null
 
     private fun restoreState(): SplitUiState {
         val mode = saved.get<String>(KEY_MODE)?.let { runCatching { SplitMode.valueOf(it) }.getOrNull() }
@@ -203,50 +218,61 @@ class SplitViewModel(
     // ── Source ──────────────────────────────────────────────────────────────
 
     fun onSourcePicked(uri: Uri) {
+        // A running split belongs to the old file: stop it (its own cleanup
+        // removes partial output) before the screen moves to the new one.
+        if (_state.value.run.phase == RunPhase.RUNNING) cancel()
+        outlineJob?.cancel()
+        previewJob?.cancel()
+        resultPreviewJob?.cancel()
+        _state.update(SourceScope::beginPick)
+        val generation = _state.value.sourceGeneration
         viewModelScope.launch {
-            _state.update {
-                it.copy(loadingSource = true, sourceError = null, run = RunState())
-            }
             val basic = withContext(Dispatchers.IO) { readBasic(uri) }
             if (basic == null) {
-                _state.update {
-                    it.copy(
-                        loadingSource = false,
-                        sourceError = "读不出页数，可能已加密或文件损坏",
-                    )
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        it.copy(
+                            loadingSource = false,
+                            sourceError = "读不出页数，可能已加密或文件损坏",
+                        )
+                    }
                 }
                 return@launch
             }
-            _state.update {
-                it.copy(
-                    loadingSource = false,
-                    source = basic.copy(probing = true),
-                    rules = it.rules.copy(
-                        rangeText = if (it.rules.rangeText.isBlank()) {
-                            "1-${basic.pageCount}"
-                        } else {
-                            it.rules.rangeText
-                        },
-                    ),
-                )
+            _state.update { state ->
+                SourceScope.accept(state, generation) {
+                    it.copy(
+                        loadingSource = false,
+                        source = basic.copy(probing = true),
+                        rules = it.rules.copy(
+                            rangeText = if (it.rules.rangeText.isBlank()) {
+                                "1-${basic.pageCount}"
+                            } else {
+                                it.rules.rangeText
+                            },
+                        ),
+                    )
+                }
             }
+            if (generation != _state.value.sourceGeneration) return@launch
             schedulePreview()
 
             val extras = PdfProbe.probe(getApplication(), uri)
             _state.update { state ->
-                val current = state.source ?: return@update state
-                if (current.uri != uri) return@update state
-                state.copy(
-                    source = current.copy(
-                        probing = false,
-                        hasOutline = extras?.hasOutline ?: false,
-                        pageLabels = extras?.pageLabels,
-                        loadMs = extras?.loadMs,
-                        fastLoad = extras?.fastLoad,
-                        xrefEntries = extras?.xrefEntries ?: 0,
-                        xrefZeroOffsets = extras?.xrefZeroOffsets ?: 0,
-                    ),
-                )
+                SourceScope.accept(state, generation) {
+                    val current = it.source ?: return@accept it
+                    it.copy(
+                        source = current.copy(
+                            probing = false,
+                            hasOutline = extras?.hasOutline ?: false,
+                            pageLabels = extras?.pageLabels,
+                            loadMs = extras?.loadMs,
+                            fastLoad = extras?.fastLoad,
+                            xrefEntries = extras?.xrefEntries ?: 0,
+                            xrefZeroOffsets = extras?.xrefZeroOffsets ?: 0,
+                        ),
+                    )
+                }
             }
         }
     }
@@ -281,55 +307,71 @@ class SplitViewModel(
 
     // ── Rules ───────────────────────────────────────────────────────────────
 
-    fun setMode(mode: SplitMode) {
-        // Switching mode starts a new plan; a previous "done" card must not
-        // linger above the new (empty) preview.
-        _state.update {
-            it.copy(mode = mode, run = RunState(), resultPreview = ResultPreviewState())
+    /** Any parameter edit makes the last completed output obsolete.
+     * Guard writes during an active split; a completed run cannot silently
+     * be replayed to create suffix copies of the same output files.
+     */
+    private fun editPlan(change: (SplitUiState) -> SplitUiState) {
+        var modified = false
+        _state.update { current ->
+            if (current.run.phase == RunPhase.RUNNING || current.cleaningUp) return@update current
+            val next = change(current)
+            if (next == current) return@update current
+            modified = true
+            next.copy(
+                run = RunState(generation = next.sourceGeneration),
+                resultPreview = ResultPreviewState(),
+            )
         }
-        persist()
-        schedulePreview()
+        if (modified) {
+            persist()
+            schedulePreview()
+        }
     }
 
-    fun setRangeText(text: String) {
-        _state.update { it.copy(rules = it.rules.copy(rangeText = text)) }
-        persist()
-        schedulePreview()
-    }
+    fun setMode(mode: SplitMode) =
+        editPlan { it.copy(mode = mode) }
 
-    fun setPagesPerPart(text: String) {
-        _state.update { it.copy(rules = it.rules.copy(pagesPerPart = text)) }
-        persist()
-        schedulePreview()
-    }
+    fun setRangeText(text: String) =
+        editPlan { it.copy(rules = it.rules.copy(rangeText = text)) }
+
+    fun setPagesPerPart(text: String) =
+        editPlan { it.copy(rules = it.rules.copy(pagesPerPart = text)) }
 
     fun loadOutline() {
         val source = _state.value.source ?: return
-        viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    rules = it.rules.copy(
-                        outline = it.rules.outline.copy(loading = true, message = null),
-                    ),
-                )
+        val generation = _state.value.sourceGeneration
+        outlineJob?.cancel()
+        outlineJob = viewModelScope.launch {
+            _state.update { state ->
+                SourceScope.accept(state, generation) {
+                    it.copy(
+                        rules = it.rules.copy(
+                            outline = it.rules.outline.copy(loading = true, message = null),
+                        ),
+                    )
+                }
             }
             val nodes = runCatching {
                 PdfOutlineReader.readTree(getApplication(), source.uri)
             }.getOrNull().orEmpty()
             _state.update { state ->
-                val outline = state.rules.outline.copy(
-                    nodes = nodes,
-                    loading = false,
-                    selected = emptySet(),
-                    depth = 1,
-                    source = if (nodes.isEmpty()) OutlineSource.NONE else OutlineSource.BOOKMARKS,
-                    message = if (nodes.isEmpty()) {
-                        "这个 PDF 没有书签（与有没有文字层无关）"
-                    } else {
-                        "读取到 ${nodes.size} 个书签，最深 ${nodes.maxOfOrNull { n -> n.depth } ?: 1} 级"
-                    },
-                )
-                state.copy(rules = state.rules.copy(outline = outline))
+                SourceScope.accept(state, generation) {
+                    val outline = OutlineUiState(
+                        nodes = nodes,
+                        loading = false,
+                        selected = emptySet(),
+                        depth = 1,
+                        generation = generation,
+                        source = if (nodes.isEmpty()) OutlineSource.NONE else OutlineSource.BOOKMARKS,
+                        message = if (nodes.isEmpty()) {
+                            "这个 PDF 没有书签（与有没有文字层无关）"
+                        } else {
+                            "读取到 ${nodes.size} 个书签，最深 ${nodes.maxOfOrNull { n -> n.depth } ?: 1} 级"
+                        },
+                    )
+                    it.copy(rules = it.rules.copy(outline = outline))
+                }
             }
             schedulePreview()
         }
@@ -337,78 +379,87 @@ class SplitViewModel(
 
     fun scanTextHeadings() {
         val source = _state.value.source ?: return
-        viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    rules = it.rules.copy(
-                        outline = it.rules.outline.copy(
-                            loading = true,
-                            message = null,
-                            scanning = 0,
-                            totalForScan = source.pageCount,
+        val generation = _state.value.sourceGeneration
+        outlineJob?.cancel()
+        outlineJob = viewModelScope.launch {
+            _state.update { state ->
+                SourceScope.accept(state, generation) {
+                    it.copy(
+                        rules = it.rules.copy(
+                            outline = it.rules.outline.copy(
+                                loading = true,
+                                message = null,
+                                scanning = 0,
+                                totalForScan = source.pageCount,
+                            ),
                         ),
-                    ),
-                )
+                    )
+                }
             }
             val detection = runCatching {
                 PdfChapterDetector.detect(getApplication(), source.uri) { scanned, total ->
                     _state.update { state ->
-                        state.copy(
-                            rules = state.rules.copy(
-                                outline = state.rules.outline.copy(
-                                    scanning = scanned,
-                                    totalForScan = total,
+                        SourceScope.accept(state, generation) {
+                            it.copy(
+                                rules = it.rules.copy(
+                                    outline = it.rules.outline.copy(
+                                        scanning = scanned,
+                                        totalForScan = total,
+                                    ),
                                 ),
-                            ),
-                        )
+                            )
+                        }
                     }
                 }
             }.getOrNull()
 
             _state.update { state ->
-                val outline = when {
-                    detection == null -> state.rules.outline.copy(
-                        loading = false,
-                        message = "扫描正文失败，文件可能已损坏",
-                    )
-                    !detection.hasTextLayer -> state.rules.outline.copy(
-                        loading = false,
-                        message = "这本书没有文字层（扫描件），读不出标题；" +
-                            "但书签可能仍然存在，试试「读取书签」",
-                    )
-                    detection.chapters.isEmpty() -> state.rules.outline.copy(
-                        loading = false,
-                        message = "有文字层，但没找到明显的章节标题",
-                    )
-                    else -> {
-                        val nodes = detection.chapters.mapIndexed { index, chapter ->
-                            OutlineNode(
-                                index = index,
-                                title = chapter.title,
+                SourceScope.accept(state, generation) { current ->
+                    val base = current.rules.outline.copy(generation = generation)
+                    val outline = when {
+                        detection == null -> base.copy(
+                            loading = false,
+                            message = "扫描正文失败，文件可能已损坏",
+                        )
+                        !detection.hasTextLayer -> base.copy(
+                            loading = false,
+                            message = "这本书没有文字层（扫描件），读不出标题；" +
+                                "但书签可能仍然存在，试试「读取书签」",
+                        )
+                        detection.chapters.isEmpty() -> base.copy(
+                            loading = false,
+                            message = "有文字层，但没找到明显的章节标题",
+                        )
+                        else -> {
+                            val nodes = detection.chapters.mapIndexed { index, chapter ->
+                                OutlineNode(
+                                    index = index,
+                                    title = chapter.title,
+                                    depth = 1,
+                                    parentIndex = -1,
+                                    startPage1 = chapter.startPage1,
+                                )
+                            }
+                            base.copy(
+                                nodes = nodes,
+                                selected = emptySet(),
                                 depth = 1,
-                                parentIndex = -1,
-                                startPage1 = chapter.startPage1,
+                                loading = false,
+                                source = OutlineSource.TEXT_SCAN,
+                                message = "从正文识别到 ${nodes.size} 个章节" +
+                                    "（${detection.textPages}/${detection.totalPages} 页有文字）",
                             )
                         }
-                        state.rules.outline.copy(
-                            nodes = nodes,
-                            selected = emptySet(),
-                            depth = 1,
-                            loading = false,
-                            source = OutlineSource.TEXT_SCAN,
-                            message = "从正文识别到 ${nodes.size} 个章节" +
-                                "（${detection.textPages}/${detection.totalPages} 页有文字）",
-                        )
                     }
+                    current.copy(rules = current.rules.copy(outline = outline))
                 }
-                state.copy(rules = state.rules.copy(outline = outline))
             }
             schedulePreview()
         }
     }
 
     fun toggleChapter(index: Int) {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             state.copy(
                 rules = state.rules.copy(
@@ -418,20 +469,18 @@ class SplitViewModel(
                 ),
             )
         }
-        schedulePreview()
     }
 
     fun setDepth(depth: Int) {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             val allowed = depth.coerceIn(1, outline.maxDepth.coerceAtLeast(1))
             state.copy(rules = state.rules.copy(outline = outline.copy(depth = allowed)))
         }
-        schedulePreview()
     }
 
     fun selectAllAtDepth() {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             val wanted = outline.nodes.filter { it.depth == outline.depth }
             state.copy(
@@ -440,39 +489,34 @@ class SplitViewModel(
                 ),
             )
         }
-        schedulePreview()
     }
 
     fun clearSelection() {
-        _state.update { state ->
+        editPlan { state ->
             state.copy(
                 rules = state.rules.copy(
                     outline = state.rules.outline.copy(selected = emptySet()),
                 ),
             )
         }
-        schedulePreview()
     }
 
     // ── Output & advanced ───────────────────────────────────────────────────
 
     fun setOutputDirectory(uri: Uri, label: String) {
-        _state.update { it.copy(outputTreeUri = uri, outputLabel = label) }
-        persist()
-        schedulePreview()
+        editPlan { it.copy(outputTreeUri = uri, outputLabel = label) }
     }
 
     fun setDeepVerify(enabled: Boolean) {
-        _state.update { it.copy(deepVerify = enabled) }
-        persist()
+        editPlan { it.copy(deepVerify = enabled) }
     }
 
     fun setConcurrencyAuto(auto: Boolean) {
-        _state.update { it.copy(concurrencyAuto = auto) }
+        editPlan { it.copy(concurrencyAuto = auto) }
     }
 
     fun setConcurrencyManual(value: Int) {
-        _state.update {
+        editPlan {
             it.copy(
                 concurrencyAuto = false,
                 concurrencyManual = ConcurrencyPolicy.sanitize(value, it.cores),
@@ -495,27 +539,32 @@ class SplitViewModel(
      */
     fun splitWholeBookByChapters() {
         val source = _state.value.source ?: return
-        viewModelScope.launch {
-            _state.update {
-                it.copy(
-                    mode = SplitMode.OUTLINE,
-                    run = RunState(),
-                    resultPreview = ResultPreviewState(),
-                    rules = it.rules.copy(
-                        outline = it.rules.outline.copy(
-                            loading = true,
-                            message = "正在读取整本目录…",
+        val generation = _state.value.sourceGeneration
+        outlineJob?.cancel()
+        outlineJob = viewModelScope.launch {
+            _state.update { state ->
+                SourceScope.accept(state, generation) {
+                    it.copy(
+                        mode = SplitMode.OUTLINE,
+                        run = RunState(generation = generation),
+                        resultPreview = ResultPreviewState(),
+                        rules = it.rules.copy(
+                            outline = it.rules.outline.copy(
+                                loading = true,
+                                message = "正在读取整本目录…",
+                            ),
                         ),
-                    ),
-                )
+                    )
+                }
             }
             val nodes = withContext(Dispatchers.IO) {
                 runCatching {
                     PdfOutlineReader.readTree(getApplication(), source.uri)
                 }.getOrNull().orEmpty()
             }
+            if (generation != _state.value.sourceGeneration) return@launch
             if (nodes.isNotEmpty()) {
-                applyWholeBookOutline(nodes)
+                applyWholeBookOutline(nodes, source.pageCount, generation)
                 return@launch
             }
 
@@ -535,60 +584,59 @@ class SplitViewModel(
                     )
                 }
                 _state.update { state ->
-                    val outline = state.rules.outline.copy(
-                        nodes = generated,
-                        selected = generated.map { it.index }.toSet(),
-                        depth = 1,
-                        loading = false,
-                        source = OutlineSource.TEXT_SCAN,
-                        message = "整本没有书签，已从正文文字识别出 ${generated.size} 个章节",
-                    )
-                    state.copy(rules = state.rules.copy(outline = outline))
+                    SourceScope.accept(state, generation) {
+                        val outline = OutlineUiState(
+                            nodes = generated,
+                            selected = OutlinePlanner.wholeBookSelection(generated, source.pageCount).selected,
+                            depth = 1,
+                            loading = false,
+                            generation = generation,
+                            source = OutlineSource.TEXT_SCAN,
+                            message = "整本没有书签，已从正文文字识别出 ${generated.size} 个章节",
+                        )
+                        it.copy(rules = it.rules.copy(outline = outline))
+                    }
                 }
             } else {
                 _state.update { state ->
-                    val noText = detection == null || !detection.hasTextLayer
-                    val outline = state.rules.outline.copy(
-                        nodes = emptyList(),
-                        selected = emptySet(),
-                        loading = false,
-                        source = OutlineSource.NONE,
-                        message = if (noText) {
-                            "整本既没有书签，也没有文字层（纯图片扫描件）。识别章节需要 OCR，本版本未包含；请改用「指定页码」或「固定页数」。"
-                        } else {
-                            "整本没有书签，正文里也没找到明显的章节标题；请改用「指定页码」。"
-                        },
-                    )
-                    state.copy(rules = state.rules.copy(outline = outline))
+                    SourceScope.accept(state, generation) {
+                        val noText = detection == null || !detection.hasTextLayer
+                        val outline = OutlineUiState(
+                            loading = false,
+                            generation = generation,
+                            source = OutlineSource.NONE,
+                            message = if (noText) {
+                                "整本既没有书签，也没有文字层（纯图片扫描件）。识别章节需要 OCR，本版本未包含；请改用「指定页码」或「固定页数」。"
+                            } else {
+                                "整本没有书签，正文里也没找到明显的章节标题；请改用「指定页码」。"
+                            },
+                        )
+                        it.copy(rules = it.rules.copy(outline = outline))
+                    }
                 }
             }
             schedulePreview()
         }
     }
 
-    private fun applyWholeBookOutline(nodes: List<OutlineNode>) {
-        // "逐章" means the chapter level, not every last sub-section: a textbook
-        // with 600 bookmarks would otherwise produce hundreds of tiny files.
-        // Prefer level 2 (e.g. ST01-CH03), fall back to level 1, and keep the
-        // level switch in the UI so the user can pick a different granularity.
-        val level = if (nodes.any { it.depth == 2 }) 2 else 1
-        val parents = nodes.map { it.parentIndex }.toSet()
-        val atLevel = nodes.filter { it.depth == level }
-        val orphanTops = nodes.filter { it.depth < level && it.index !in parents }
-        val chosen = (atLevel + orphanTops)
-            .distinctBy { it.startPage1 }
-            .ifEmpty { nodes.filter { it.depth == 1 } }
+    private fun applyWholeBookOutline(nodes: List<OutlineNode>, totalPages: Int, generation: Long) {
+        // "逐章" means the chapter level, not every last sub-section; see
+        // OutlinePlanner.wholeBookSelection for the exact rule.
+        val choice = OutlinePlanner.wholeBookSelection(nodes, totalPages)
         _state.update { state ->
-            val outline = state.rules.outline.copy(
-                nodes = nodes,
-                selected = chosen.map { it.index }.toSet(),
-                depth = level,
-                loading = false,
-                source = OutlineSource.BOOKMARKS,
-                message = "整本目录：${nodes.size} 个书签，已按第 $level 级选中 " +
-                    "${chosen.size} 个章节；可在下方切换层级后点「全选本级」",
-            )
-            state.copy(rules = state.rules.copy(outline = outline))
+            SourceScope.accept(state, generation) {
+                val outline = OutlineUiState(
+                    nodes = nodes,
+                    selected = choice.selected,
+                    depth = choice.level,
+                    loading = false,
+                    generation = generation,
+                    source = OutlineSource.BOOKMARKS,
+                    message = "整本目录：${nodes.size} 个书签，已按第 ${choice.level} 级选中 " +
+                        "${choice.selected.size} 个章节；可在下方切换层级后点「全选本级」",
+                )
+                it.copy(rules = it.rules.copy(outline = outline))
+            }
         }
         schedulePreview()
     }
@@ -596,6 +644,7 @@ class SplitViewModel(
     // ── Post-split preview ──────────────────────────────────────────────────
 
     fun openResultPreview(output: SplitOutput) {
+        val generation = _state.value.sourceGeneration
         resultPreviewJob?.cancel()
         _state.update {
             it.copy(resultPreview = ResultPreviewState(output = output, loading = true))
@@ -613,6 +662,7 @@ class SplitViewModel(
                 Triple(size, first, last)
             }
             _state.update { current ->
+                if (current.sourceGeneration != generation) return@update current
                 if (current.resultPreview.output?.uri != output.uri) return@update current
                 current.copy(
                     resultPreview = current.resultPreview.copy(
@@ -636,18 +686,39 @@ class SplitViewModel(
 
     private fun schedulePreview() {
         previewJob?.cancel()
+        val generation = _state.value.sourceGeneration
         previewJob = viewModelScope.launch {
             val quick = buildPreview(existing = emptySet(), knownFolder = false)
-            _state.update { it.copy(preview = quick) }
+            _state.update { state -> SourceScope.accept(state, generation) { it.copy(preview = quick) } }
             val tree = _state.value.outputTreeUri ?: return@launch
             delay(250)
-            val existing = SafOutputDirectory.listExistingNames(getApplication(), tree)
+            val existing = try {
+                SafOutputDirectory.listExistingNames(getApplication(), tree)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        it.copy(preview = it.preview.copy(
+                            blocked = true,
+                            blockedReason = error.message ?: "无法读取保存目录，请重新选择",
+                        ))
+                    }
+                }
+                return@launch
+            }
             val full = buildPreview(existing = existing, knownFolder = true)
-            _state.update { it.copy(preview = full) }
+            _state.update { state -> SourceScope.accept(state, generation) { it.copy(preview = full) } }
         }
     }
 
-    private fun buildPreview(existing: Set<String>, knownFolder: Boolean): PreviewState {
+    private fun buildPreview(existing: Set<String>, knownFolder: Boolean): PreviewState =
+        buildPreviewUnstamped(existing, knownFolder).copy(
+            generation = _state.value.sourceGeneration,
+            documentPages = _state.value.source?.pageCount ?: 0,
+        )
+
+    private fun buildPreviewUnstamped(existing: Set<String>, knownFolder: Boolean): PreviewState {
         val state = _state.value
         val source = state.source
             ?: return PreviewState(blocked = true, blockedReason = "请先选择 PDF")
@@ -695,7 +766,8 @@ class SplitViewModel(
                 )
             }
             SplitMode.OUTLINE -> {
-                val outline = state.rules.outline
+                // An outline read for another file counts as not read at all.
+                val outline = SourceScope.currentOutline(state)
                 if (outline.selected.isEmpty()) {
                     return PreviewState(
                         blocked = true,
@@ -762,18 +834,31 @@ class SplitViewModel(
 
     fun start() {
         val state = _state.value
-        if (state.run.phase == RunPhase.RUNNING) return
+        if (state.run.phase == RunPhase.RUNNING ||
+            state.run.phase == RunPhase.DONE || state.cleaningUp
+        ) return
         val source = state.source ?: return
         val tree = state.outputTreeUri ?: return
-        val parts = state.preview.parts
-        if (parts.isEmpty() || state.preview.blocked) return
+        val generation = state.sourceGeneration
+        // Re-plan from the current file and rules; refuse to write if the plan on
+        // screen is not exactly that plan for this generation.
+        val fresh = buildPreview(existing = emptySet(), knownFolder = false)
+        if (!SourceScope.mayRun(state, fresh)) {
+            schedulePreview()
+            return
+        }
+        val retrying = state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty()
+        val previouslyCompleted = if (retrying) state.run.outputs else emptyList()
+        val parts = if (retrying) state.run.failedParts else state.preview.parts
 
         _state.update {
             it.copy(
                 run = RunState(
                     phase = RunPhase.RUNNING,
                     headline = "准备中…",
-                    total = parts.size,
+                    total = parts.size + previouslyCompleted.size,
+                    outputs = previouslyCompleted,
+                    generation = generation,
                 ),
                 resultPreview = ResultPreviewState(),
             )
@@ -785,14 +870,16 @@ class SplitViewModel(
                 // " (1)" behind the user's back.
                 val existing = SafOutputDirectory.listExistingNames(getApplication(), tree)
                 val fresh = OutputPlanner.avoidExisting(parts, existing)
-                if (fresh.conflicts > 0) {
-                    _state.update { current ->
-                        current.copy(
-                            preview = current.preview.copy(
-                                parts = fresh.parts,
-                                renamedByFolder = fresh.conflicts,
-                            ),
-                        )
+                if (fresh.conflicts > 0 && !retrying) {
+                    _state.update { state ->
+                        SourceScope.accept(state, generation) { current ->
+                            current.copy(
+                                preview = current.preview.copy(
+                                    parts = fresh.parts,
+                                    renamedByFolder = fresh.conflicts,
+                                ),
+                            )
+                        }
                     }
                 }
                 val finalParts = fresh.parts
@@ -804,53 +891,94 @@ class SplitViewModel(
                     deepVerify = state.deepVerify,
                     concurrency = state.effectiveConcurrency,
                 ) { event ->
-                    applyEngineEvent(event)
+                    applyEngineEvent(event, generation)
                 }
-                _state.update {
-                    it.copy(
-                        run = RunState(
-                            phase = RunPhase.DONE,
-                            fraction = 1f,
-                            headline = "完成",
-                            detail = "${outputs.size} 个文件已写入",
-                            outputs = outputs,
-                            finished = outputs.size,
-                            total = outputs.size,
-                        ),
-                    )
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        val allOutputs = (previouslyCompleted + outputs)
+                            .distinctBy { output -> output.uri }
+                            .sortedBy { output -> output.startPage1 }
+                        it.copy(
+                            run = RunState(
+                                phase = RunPhase.DONE,
+                                fraction = 1f,
+                                headline = "完成",
+                                detail = "${allOutputs.size} 个文件已写入",
+                                outputs = allOutputs,
+                                finished = allOutputs.size,
+                                total = allOutputs.size,
+                                generation = generation,
+                            ),
+                        )
+                    }
+                }
+            } catch (partial: PdfPartialFailure) {
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        val kept = (previouslyCompleted + partial.completed)
+                            .distinctBy { output -> output.uri }
+                            .sortedBy { output -> output.startPage1 }
+                        it.copy(
+                            run = RunState(
+                                phase = RunPhase.FAILED,
+                                headline = "部分完成",
+                                error = partial.message,
+                                outputs = kept,
+                                failedParts = partial.failedParts,
+                                finished = kept.size,
+                                total = kept.size + partial.failedParts.size,
+                                generation = generation,
+                            ),
+                        )
+                    }
                 }
             } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                _state.update {
-                    it.copy(
-                        run = it.run.copy(
-                            phase = RunPhase.CANCELLED,
-                            headline = "已取消",
-                            detail = "写入中的文件已清理",
-                        ),
-                    )
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        it.copy(
+                            run = it.run.copy(
+                                phase = RunPhase.CANCELLED,
+                                headline = "已取消",
+                                detail = "写入中的文件已清理",
+                            ),
+                        )
+                    }
                 }
                 throw cancelled
             } catch (error: Exception) {
-                _state.update {
-                    it.copy(
-                        run = RunState(
-                            phase = RunPhase.FAILED,
-                            headline = "失败",
-                            error = error.message ?: "拆分失败",
-                        ),
-                    )
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        it.copy(
+                            run = RunState(
+                                phase = RunPhase.FAILED,
+                                headline = "失败",
+                                error = error.message ?: "拆分失败",
+                                outputs = previouslyCompleted,
+                                failedParts = parts,
+                                finished = previouslyCompleted.size,
+                                total = previouslyCompleted.size + parts.size,
+                                generation = generation,
+                            ),
+                        )
+                    }
                 }
             } finally {
-                _state.update { it.copy(cleaningUp = false) }
-                runJob = null
+                _state.update { current ->
+                    if (current.sourceGeneration == generation) current.copy(cleaningUp = false) else current
+                }
+                if (runJob == kotlinx.coroutines.currentCoroutineContext()[Job]) {
+                    runJob = null
+                }
             }
         }
     }
 
-    private suspend fun applyEngineEvent(event: SplitEvent) {
+    private suspend fun applyEngineEvent(event: SplitEvent, generation: Long) {
         withContext(Dispatchers.Main) {
             _state.update { state ->
-                // A late progress tick must never resurrect a cancelled run.
+                // A late progress tick must never resurrect a cancelled run, nor
+                // land on a file picked after this run started.
+                if (state.sourceGeneration != generation) return@update state
                 if (state.run.phase == RunPhase.CANCELLED) return@update state
                 state.copy(
                     run = when (event) {

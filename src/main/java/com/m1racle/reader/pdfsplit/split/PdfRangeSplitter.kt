@@ -44,6 +44,7 @@ enum class TaskStage {
     CHECKING,
     SAVING,
     DONE,
+    FAILED,
 }
 
 data class TaskSnapshot(
@@ -67,6 +68,7 @@ data class TaskSnapshot(
             TaskStage.CHECKING -> 0.88f
             TaskStage.SAVING -> 0.94f
             TaskStage.DONE -> 1f
+            TaskStage.FAILED -> 0f
         }
 }
 
@@ -85,6 +87,20 @@ sealed interface SplitEvent {
 }
 
 class PdfSplitFailure(message: String) : IOException(message)
+
+/** An ordinary per-part failure preserves completed files for retry. */
+class PdfPartialFailure(
+    val completed: List<SplitOutput>,
+    val failedParts: List<SplitPart>,
+    private val explanation: String,
+) : IOException(explanation) {
+    var cleanupFailures: Int = 0
+    override val message: String
+        get() = explanation + if (cleanupFailures > 0) {
+            "；有 $cleanupFailures 个未完成文件无法删除，请检查保存目录"
+        } else ""
+}
+
 
 /**
  * Lightweight, parseable timing traces. `adb logcat -s M1PDF` gives per-part
@@ -243,6 +259,7 @@ class PdfRangeSplitter(
         val totalPages = parts.sumOf { it.pageCount }
         val createdUris = Collections.synchronizedList(ArrayList<Uri>(parts.size))
         val results = arrayOfNulls<SplitOutput>(parts.size)
+        val failedReasons = ConcurrentHashMap<Int, String>()
         // Longest-part-first scheduling. With page-order dispatch the 165-page
         // chapter starts only after nine small parts; by then every other worker
         // is idle and that one file alone decides the wall clock, which is why
@@ -306,6 +323,8 @@ class PdfRangeSplitter(
         }
 
         var succeeded = false
+        var preserveCompleted = false
+        var partialError: PdfPartialFailure? = null
         var staged: PdfBoxSetup.StagedSource? = null
         try {
             val stageStart = SystemClock.elapsedRealtime()
@@ -366,31 +385,41 @@ class PdfRangeSplitter(
                                         val index = dispatchOrder[slot]
                                         val part = parts[index]
                                         val partStart = SystemClock.elapsedRealtime()
-                                        val uri = processPart(
-                                            source = source,
-                                            part = part,
-                                            taskIndex = index,
-                                            outputTreeUri = outputTreeUri,
-                                            deepVerify = deepVerify,
-                                            sinkJob = parentJob,
-                                            onStage = { stage, pageInPart ->
-                                                publish(index, stage, pageInPart)
-                                            },
-                                            onCreate = { created -> createdUris.add(created) },
-                                        )
-                                        results[index] = SplitOutput(
-                                            displayName = part.outputName,
-                                            uri = uri,
-                                            pageCount = part.pageCount,
-                                            startPage1 = part.startPage1,
-                                            endPage1 = part.endPage1,
-                                        )
-                                        publish(index, TaskStage.DONE, part.pageCount)
-                                        finishedParts.incrementAndGet()
-                                        SplitDiagnostics.log(
-                                            "part=$index worker=$workerId pages=${part.pageCount} " +
-                                                "totalMs=${SystemClock.elapsedRealtime() - partStart}",
-                                        )
+                                        try {
+                                            val uri = processPart(
+                                                source = source,
+                                                part = part,
+                                                taskIndex = index,
+                                                outputTreeUri = outputTreeUri,
+                                                deepVerify = deepVerify,
+                                                sinkJob = parentJob,
+                                                onStage = { stage, pageInPart ->
+                                                    publish(index, stage, pageInPart)
+                                                },
+                                                onCreate = { created -> createdUris.add(created) },
+                                            )
+                                            results[index] = SplitOutput(
+                                                displayName = actualDocumentName(uri),
+                                                uri = uri,
+                                                pageCount = part.pageCount,
+                                                startPage1 = part.startPage1,
+                                                endPage1 = part.endPage1,
+                                            )
+                                            publish(index, TaskStage.DONE, part.pageCount)
+                                            finishedParts.incrementAndGet()
+                                            SplitDiagnostics.log(
+                                                "part=$index worker=$workerId pages=${part.pageCount} " +
+                                                    "totalMs=${SystemClock.elapsedRealtime() - partStart}",
+                                            )
+                                        } catch (cancelled: CancellationException) {
+                                            throw cancelled
+                                        } catch (error: Exception) {
+                                            failedReasons[index] = error.message ?: "写入或校验失败"
+                                            publish(index, TaskStage.FAILED, 0)
+                                            SplitDiagnostics.log(
+                                                "part=$index FAILED: ${error.message ?: error.javaClass.simpleName}",
+                                            )
+                                        }
                                         emitTasks()
                                     }
                                 }
@@ -403,6 +432,20 @@ class PdfRangeSplitter(
                 }
             }
 
+            if (failedReasons.isNotEmpty()) {
+                preserveCompleted = true
+                val completed = results.filterNotNull()
+                val completedFlags = BooleanArray(parts.size) { results[it] != null }
+                val missing = SplitRecoveryPolicy.failedIndices(completedFlags).map { parts[it] }
+                val first = failedReasons.entries.minByOrNull { it.key }
+                partialError = PdfPartialFailure(
+                    completed = completed,
+                    failedParts = missing,
+                    explanation = "${completed.size} 个文件成功、${missing.size} 个失败：" +
+                        (first?.let { "#${it.key + 1} ${it.value}" } ?: "写入异常"),
+                )
+                throw requireNotNull(partialError)
+            }
             succeeded = true
             results.map { requireNotNull(it) { "拆分结果不完整" } }
         } finally {
@@ -411,16 +454,30 @@ class PdfRangeSplitter(
             // a non-cancellable context so it cannot be cut short by the very
             // cancellation that triggered it.
             withContext(NonCancellable) {
+                var undeleted = 0
                 if (!succeeded) {
+                    val completedFlags = BooleanArray(parts.size) { results[it] != null }
+                    val retain = SplitRecoveryPolicy.retainedIndices(
+                        completedFlags,
+                        cancelledOrAborted = !preserveCompleted,
+                    )
+                    val keep: Set<Uri> = retain.mapNotNullTo(HashSet()) { results[it]?.uri }
                     synchronized(createdUris) {
-                        createdUris.forEach { uri ->
-                            runCatching {
+                        createdUris.filterNot { it in keep }.forEach { uri ->
+                            val removed = runCatching {
                                 DocumentsContract.deleteDocument(appContext.contentResolver, uri)
-                            }
+                            }.getOrDefault(false)
+                            if (!removed) undeleted += 1
                         }
                     }
                 }
-                staged?.takeIf { it.temporary }?.file?.delete()
+                if (staged?.temporary == true && staged.file.exists() && !staged.file.delete()) {
+                    SplitDiagnostics.log("source staging cleanup failed")
+                }
+                partialError?.cleanupFailures = undeleted
+                if (undeleted > 0 && partialError == null) {
+                    throw PdfSplitFailure("清理失败：有 $undeleted 个输出文件未删除；请检查保存目录")
+                }
             }
             SplitDiagnostics.log(
                 "run end totalMs=${SystemClock.elapsedRealtime() - runStart} " +
@@ -619,6 +676,19 @@ class PdfRangeSplitter(
             }
         }
         return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    /** The provider may rename on collision after the directory was listed.
+     * Show the real persisted name, never a speculative planned name.
+     */
+    private fun actualDocumentName(uri: Uri): String {
+        val resolver = appContext.contentResolver
+        val projection = arrayOf(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+        val value = resolver.query(uri, projection, null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+        return value?.takeIf { it.isNotBlank() }
+            ?: throw PdfSplitFailure("无法确认输出文件名，请检查保存目录")
     }
 
     private fun createOutputDocument(outputTreeUri: Uri, displayName: String): Uri {
