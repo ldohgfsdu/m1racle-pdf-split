@@ -14,8 +14,8 @@ plugins {
 // Standalone PDF range-splitting tool. No Reader modules are on the compile
 // classpath: EPUB, notes, bookmarks, Room and the reader chrome are all absent.
 // Public version identity is explicit; never derived from Git.
-val toolVersionCode = 4
-val toolVersionName = "1.1.1"
+val toolVersionCode = 6
+val toolVersionName = "1.2.0-rc2"
 
 val releaseSigningEnvironmentNames = listOf(
     "M1RACLE_RELEASE_STORE_FILE",

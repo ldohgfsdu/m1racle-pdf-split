@@ -17,7 +17,6 @@ import com.tom_roush.pdfbox.io.ScratchFile
 import com.tom_roush.pdfbox.pdfparser.PDFParser
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.pdmodel.PDPage
-import com.tom_roush.pdfbox.pdmodel.PDResources
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.io.ByteArrayOutputStream
@@ -372,6 +371,11 @@ internal object PdfBoxSetup {
      * exactly the case this protects.
      */
     private fun readDrawings(streams: List<COSStream>, budget: Int): DrawingEvidence {
+        // `/Contents` 存在却一个流都拿不到，说明这条引用我们没解析成功。
+        // 返回空集合并标记为完整，会让本来被绘制的资源被判成"未使用" —— 这
+        // 正是对象流样本暴露出来的假阴性。宁可判不可证。
+        if (streams.isEmpty()) return DrawingEvidence.UNREAD
+
         val builder = StringBuilder()
         var truncated = false
         for (stream in streams) {
@@ -460,7 +464,13 @@ internal object PdfBoxSetup {
                     stream.getDictionaryObject(COSName.SUBTYPE) as? COSName
                 }.getOrNull()
                 if (subtype == COSName.FORM) {
-                    val nested = runCatching { PDResources(stream).cosObject }.getOrNull()
+                    // Form 的 /Resources 在它自己的字典里，不在字典本身。
+                    // `PDResources(stream)` 取的是**这个 Form 的字典**，拿它当
+                    // 资源字典去找 /XObject 永远为空 —— 内层坏引用因此从未被
+                    // 检查过（nested-form 样本暴露）。
+                    val nested = runCatching {
+                        stream.getDictionaryObject(COSName.RESOURCES) as? COSDictionary
+                    }.getOrNull()
                     if (nested != null) {
                         val formEvidence = FastPathGuard.combine(
                             evidence,

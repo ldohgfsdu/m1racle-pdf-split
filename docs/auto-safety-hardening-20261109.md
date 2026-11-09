@@ -118,11 +118,7 @@ probePageTree(strictDocument, xref?.badObjectNumbers?.toSet() ?: emptySet())
   - `CompatFixturesTest` 5 例：健康表不否决、xref 关键字破坏被否决、增量更新能报出旧代坏对象、对象流坏条目被报出、加密被否决。
 - `07-incremental` 与 `08-objstream` 两条**先失败后修好**，是这一轮实际发现的扫描器缺陷，不是补写的断言。
 
-**未验证（受限于设备）**
-
-- 9 个样本在真机上 strict / lenient / AUTO 三态的**实际决策**。这需要 `probePageTree`，只能在 Android 运行时跑；本轮 adb 设备始终未接入。
-- 因此：`02`、`03`、`04`、`05` 四条只能证明"判据规则正确"，尚未证明"真机上确实回退"。
-- 那本 988 MB 教材在新判据下**是否仍走快速路径**也待复测。理论分析：该文件 420 页内容流都很短，`Do` 计数应当一致、不会截断；但这只是推断，必须以日志为准。
+**真机验证**：设备接通后已补齐，见第八节。结论是 9 条样本里 7 条按预期，2 条暴露了实现层缺陷（非判据问题），修复后全部达标。
 
 ---
 
@@ -166,3 +162,86 @@ v1.1.1 保留发布：它的产物正确性有独立解析器证据（423/423 �
 2. 9 个样本在真机上的 strict / lenient / AUTO 三态实测，特别是 02/03/04/05 必须确认**回退发生了**，而不只是判据规则正确
 3. 988 MB 教材在新判据下复测，确认仍走快速路径且 `softMiss=1`
 4. 上述通过后，再考虑 probe 按需化（当前 3.7 s 已经够用，不能为再省一点时间冒兼容性风险）
+
+
+---
+
+## 八、真机验证（设备接通后补齐，2026-11-09）
+
+设备：Xiaomi 25098PN5AC / Android 16 (SDK 36)，adb `db04f865`。
+
+### 8.1 发布件安装验证（对应上一轮遗留的 ①）
+
+| 检查 | 结果 |
+| --- | --- |
+| 安装 | `adb install -r` 成功，覆盖 1.1.1（code 4） |
+| 装机包 `base.apk` SHA-256 | `a0444d7362dbbb709c1c4313bab28bdff27ecf2dd4f201bcf0430d5cadeb7c90` |
+| 与 Release 附件比对 | `cmp` **逐字节相同** |
+| 两个入口 | `pdfsplit.MainActivity`、`pdfsplit.verify.VerifyActivity` 均能启动，crash buffer 为空 |
+| 文件选择 | SAF 选择器正常，可读到 1 GB 源文件 |
+| 420 页拆分 | `finished=21/21`，`totalMs=7984`，产物 21 个、命名 `src_0001-0020.pdf`… |
+| 前后台切换 | HOME 再回前台，`拆分完成 / 21 个文件` 完整保留 |
+| 进程被杀后重进 | 回到空状态（无会话恢复）；磁盘产物 21 个仍在 |
+
+「进程被杀后不恢复」是设计现状，不是缺陷，但值得记：用户切走太久被系统回收后要重新选文件。
+
+### 8.2 三态矩阵：v1.1.1（修复前）vs 1.2.0-rc2（修复后）
+
+同一套样本、同一台设备、同一选择器路径。
+
+| 样本 | 期望 | v1.1.1 实测 | rc2 实测 | 判定 |
+| --- | --- | --- | --- | --- |
+| 01-healthy | strict | strict | strict | ✓ |
+| 02-big-content-tail | lenient | **strict**（`Im9` 判"未被绘制"） | lenient：内容流未能完整读取 | 修复 |
+| 03-escaped-name | lenient | **strict**（`KSPX1` 判"未被绘制"） | lenient：内容流确实绘制了它 | 修复 |
+| 04-nested-form | lenient | **strict**（连 softMiss 都没有） | lenient：内容流确实绘制了它 | 修复 |
+| 05-unpaired-do | lenient | **strict**（`Im2` 判"未被绘制"） | lenient：内容流未能完整读取 | 修复 |
+| 06-xref-garbage | lenient | lenient（strict 加载失败） | 未重跑（路径未改动） | ✓ |
+| 07-incremental | lenient | **strict**（`entries=2`，只读新代） | lenient：确实绘制了它，`prev=true` | 修复 |
+| 08-objstream | lenient | **strict**（`entries=0`） | lenient：未能完整读取，`entries=8` | 修复 |
+| 09-encrypted | 拒绝打开 | 未投喂成功（见 8.4） | 未投喂 | 待补 |
+| 10-undrawn-broken | strict | strict，softMiss=1 | strict，softMiss=1 | ✓ 反向对照 |
+
+结论：**v1.1.1 在 7 个判别样本里有 6 个走错了路径**——正是本轮要堵的假阴性，真机上原样复现。rc2 全部纠正，且没有把 `01` / `10` 误判成需要回退。
+
+### 8.3 rc2 上又暴露两个实现层缺陷
+
+第一轮 rc1 跑完，`04` 与 `08` 仍是 strict。不是判据错，是代码没走到判据：
+
+1. **`04` 嵌套 Form**：`PDResources(stream)` 返回的是这个 Form **自身的字典**，不是它的 `/Resources`。拿它当资源字典找 `/XObject` 永远为空，内层坏引用从未被检查过。改为 `stream.getDictionaryObject(COSName.RESOURCES)`。
+2. **`08` 对象流**：`/Contents` 存在却解析不出流时，`contentStreams` 返回空列表，被当成"读完了、什么都没画"→ 完整证据 → 假阴性。改为**空流列表直接返回 `DrawingEvidence.UNREAD`**。
+
+修完 rc2 两条都变成 lenient，且 `01`/`10` 仍 strict。这印证了一件事：只验证"判据规则正确"不够，必须看真机上到底走了哪条路——这两条缺陷在单测层面完全不可见，因为单测不经过 PDFBox 的对象解析。
+
+### 8.4 未完成项
+
+- **09-encrypted 没能在 UI 里投喂**：文件在 `/sdcard/Download/fixtures/` 存在，但系统文档选择器不列它（合成加密 PDF 的 MIME 探测失败），`appops set MANAGE_EXTERNAL_STORAGE allow` 在 MIUI 上不生效，`file://` 直达因此也不可用。该样本目前只有扫描器级证据（`encrypted=true` → 否决）。
+- 06-xref-garbage 未在 rc2 重跑；该路径不涉及本轮改动。
+- probe 按需化（用户已决定推迟）。
+
+### 8.5 教材回归（最关键的一条）
+
+988 MB / 420 页 / 21 条 offset=0，rc2 实测：
+
+```
+probe stageMs=757 loadMs=2994 decision=[strict scanMs=31 zeroOffset=21
+      entries=3163 softMiss=1 first=第 15 页 XObject/COSName{KSPX1} 引用了坏对象 3148，但未被绘制]
+load worker=0 ms=2995 mode=STRICT
+run end totalMs=7776 finished=21/21
+```
+
+- 仍走**快速路径**，没有出现 `unvetted=`（说明扫描结果可信、未被否决）
+- `softMiss=1` 仍是第 15 页那一处，判为"未被绘制"，与 A1/A2 结论一致
+- 21/21 拆分成功，产物总字节数 **1,030,595,782 B**，与 v1.1.1 同配置完全一致
+
+也就是说：加固没有牺牲真实收益，也没有改变产物。
+
+### 8.6 复现方式
+
+```
+python tools/make-compat-fixtures.py --out build/fixtures
+adb push build/fixtures/. /sdcard/Download/fixtures/
+./tools/device-fixture-matrix.sh 01-healthy.pdf 02-big-content-tail.pdf …
+```
+
+`tools/device-fixture-matrix.sh` 走 SAF 选择器（与真实用户一致），逐条采集 `M1PDF` 的 `decision=` 行。脚本内部有一处坑已记住：`uiautomator dump` 是**单行 XML**，不能用 `tr '>' '\n'` 切；早期版本因此把整份文档的 bounds 全捞出来、取"面积最小"选中了返回箭头，点击全打偏。

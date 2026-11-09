@@ -13,6 +13,7 @@
 | 07-incremental      | 增量更新（两代 xref + /Prev） |
 | 08-objstream        | xref 流 + 对象流（/ObjStm） |
 | 09-encrypted        | 带 /Encrypt 的文件，扫描器应报 encrypted |
+| 10-undrawn-broken   | 反向对照：坏对象从未被绘制且内容流完整 → 必须仍走 strict |
 
 用法:
     python tools/make-compat-fixtures.py --out fixtures/compat-20261109
@@ -195,13 +196,32 @@ def fixture_nested_form():
 
 
 def fixture_unpaired_do():
-    # 名称里带高字节：`/(?!…)` 之外，下面前缀让正则无法配对
+    """内容流里有一个正则读不出名字的 Do，同时存在一个**未被绘制**的坏对象。
+
+    这是判据的分水岭：
+    - 若把 evidence 当作完整（旧实现），坏对象 /Im2 不在 drawnNames 里 → soft → 走 strict
+    - 正确行为：有读不懂的 Do，就无法断言 /Im2 没被画 → 必须回退 lenient
+    """
     b = single_page(
         b"/\xe4\xb8\xad Do\n/Im1 Do\n",
+        b"<< /XObject << /Im1 5 0 R /Im2 6 0 R >> >>",
+    )
+    b.add(5, image_stub())
+    b.add(6, image_stub())
+    return force_bad_entry(b.build_classic(), 6)
+
+
+def fixture_undrawn_broken():
+    """反向对照：内容流完整、坏对象从未被 Do 绘制 → 必须仍走 strict。
+
+    没有这条，fail-closed 的改动可能一路走到"全都回退"而没人发现。
+    """
+    b = single_page(
+        b"q 1 0 0 1 0 0 cm Q\n",
         b"<< /XObject << /Im1 5 0 R >> >>",
     )
     b.add(5, image_stub())
-    return b.build_classic()
+    return force_bad_entry(b.build_classic(), 5)
 
 
 def fixture_xref_garbage():
@@ -280,6 +300,7 @@ FIXTURES = {
     "07-incremental": fixture_incremental,
     "08-objstream": fixture_objstream,
     "09-encrypted": fixture_encrypted,
+    "10-undrawn-broken": fixture_undrawn_broken,
 }
 
 
