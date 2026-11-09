@@ -47,6 +47,8 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Unit tests, debuggable APK and lint
         run: bash ./gradlew testDebugUnitTest assembleDebug lintDebug --no-daemon --console=plain
+      - name: Bounded design models and negative controls (not Kotlin proofs)
+        run: python3 tools/formal/verify_models.py
       - name: Validate local release script syntax
         run: bash -n scripts/release.sh
       - name: Publish lint artifacts for follow-up
