@@ -105,7 +105,8 @@ fun SplitScreen(
                 when {
                     state.run.phase == RunPhase.RUNNING || state.run.tasks.isNotEmpty() ->
                         TaskBoard(state.run)
-                    state.run.phase == RunPhase.DONE -> ResultCard(state, vm)
+                    state.run.phase == RunPhase.DONE ||
+                        (state.run.phase == RunPhase.FAILED && state.run.outputs.isNotEmpty()) -> ResultCard(state, vm)
                     else -> PlanCard(state, planExpanded) { planExpanded = !planExpanded }
                 }
 
@@ -1004,11 +1005,13 @@ private fun TaskRow(task: TaskSnapshot) {
                     TaskStage.CHECKING -> "校验"
                     TaskStage.SAVING -> "写入"
                     TaskStage.DONE -> "完成"
+                    TaskStage.FAILED -> "失败"
                 },
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,
                 color = when (task.stage) {
                     TaskStage.DONE -> Palette.accent
+                    TaskStage.FAILED -> Palette.danger
                     TaskStage.QUEUED -> Palette.textTertiary
                     else -> Palette.textSecondary
                 },
@@ -1062,7 +1065,7 @@ private fun ProgressBar(fraction: Float, height: Dp = 6.dp, dimmed: Boolean = fa
 private fun ResultCard(state: SplitUiState, vm: SplitViewModel) {
     val run = state.run
     InfoCard(
-        title = "拆分完成",
+        title = if (run.phase == RunPhase.FAILED) "部分完成（可重试失败项）" else "拆分完成",
         trailing = {
             Box(
                 modifier = Modifier
@@ -1311,6 +1314,8 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
                 text = when {
                     state.cleaningUp -> "已取消，正在清理未完成的文件…"
                     state.run.phase == RunPhase.DONE -> "已生成 ${state.run.outputs.size} 个文件，可逐项预览"
+                    state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
+                        "已完成 ${state.run.outputs.size} 个，失败 ${state.run.failedParts.size} 个，可单独重试"
                     else -> state.blockedReason
                         ?: "预计生成 ${state.preview.fileCount} 个 PDF"
                 },
@@ -1323,6 +1328,8 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
             text = when {
                 running -> "取消"
                 state.run.phase == RunPhase.DONE -> "已完成，修改规则可再拆"
+                state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
+                    "重试失败的 ${state.run.failedParts.size} 个"
                 else -> "开始拆分"
             },
             onClick = { if (running) vm.cancel() else vm.start() },
