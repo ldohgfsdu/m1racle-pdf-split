@@ -20,6 +20,7 @@ import com.m1racle.reader.pdfsplit.split.PdfBoxSetup
 import com.m1racle.reader.pdfsplit.split.PdfChapterDetector
 import com.m1racle.reader.pdfsplit.split.PdfOutlineReader
 import com.m1racle.reader.pdfsplit.split.PdfProbe
+import com.m1racle.reader.pdfsplit.split.PdfPartialFailure
 import com.m1racle.reader.pdfsplit.split.PdfRangeSplitter
 import com.m1racle.reader.pdfsplit.split.SafOutputDirectory
 import com.m1racle.reader.pdfsplit.split.SplitEvent
@@ -108,6 +109,7 @@ data class RunState(
     val detail: String = "",
     val tasks: List<TaskSnapshot> = emptyList(),
     val outputs: List<SplitOutput> = emptyList(),
+    val failedParts: List<SplitPart> = emptyList(),
     val finished: Int = 0,
     val total: Int = 0,
     val error: String? = null,
@@ -831,14 +833,17 @@ class SplitViewModel(
             schedulePreview()
             return
         }
-        val parts = state.preview.parts
+        val retrying = state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty()
+        val previouslyCompleted = if (retrying) state.run.outputs else emptyList()
+        val parts = if (retrying) state.run.failedParts else state.preview.parts
 
         _state.update {
             it.copy(
                 run = RunState(
                     phase = RunPhase.RUNNING,
                     headline = "准备中…",
-                    total = parts.size,
+                    total = parts.size + previouslyCompleted.size,
+                    outputs = previouslyCompleted,
                     generation = generation,
                 ),
                 resultPreview = ResultPreviewState(),
@@ -851,7 +856,7 @@ class SplitViewModel(
                 // " (1)" behind the user's back.
                 val existing = SafOutputDirectory.listExistingNames(getApplication(), tree)
                 val fresh = OutputPlanner.avoidExisting(parts, existing)
-                if (fresh.conflicts > 0) {
+                if (fresh.conflicts > 0 && !retrying) {
                     _state.update { state ->
                         SourceScope.accept(state, generation) { current ->
                             current.copy(
@@ -876,15 +881,38 @@ class SplitViewModel(
                 }
                 _state.update { state ->
                     SourceScope.accept(state, generation) {
+                        val allOutputs = (previouslyCompleted + outputs)
+                            .distinctBy { output -> output.uri }
+                            .sortedBy { output -> output.startPage1 }
                         it.copy(
                             run = RunState(
                                 phase = RunPhase.DONE,
                                 fraction = 1f,
                                 headline = "完成",
-                                detail = "${outputs.size} 个文件已写入",
-                                outputs = outputs,
-                                finished = outputs.size,
-                                total = outputs.size,
+                                detail = "${allOutputs.size} 个文件已写入",
+                                outputs = allOutputs,
+                                finished = allOutputs.size,
+                                total = allOutputs.size,
+                                generation = generation,
+                            ),
+                        )
+                    }
+                }
+            } catch (partial: PdfPartialFailure) {
+                _state.update { state ->
+                    SourceScope.accept(state, generation) {
+                        val kept = (previouslyCompleted + partial.completed)
+                            .distinctBy { output -> output.uri }
+                            .sortedBy { output -> output.startPage1 }
+                        it.copy(
+                            run = RunState(
+                                phase = RunPhase.FAILED,
+                                headline = "部分完成",
+                                error = partial.message,
+                                outputs = kept,
+                                failedParts = partial.failedParts,
+                                finished = kept.size,
+                                total = kept.size + partial.failedParts.size,
                                 generation = generation,
                             ),
                         )
@@ -911,6 +939,10 @@ class SplitViewModel(
                                 phase = RunPhase.FAILED,
                                 headline = "失败",
                                 error = error.message ?: "拆分失败",
+                                outputs = previouslyCompleted,
+                                failedParts = parts,
+                                finished = previouslyCompleted.size,
+                                total = previouslyCompleted.size + parts.size,
                                 generation = generation,
                             ),
                         )
