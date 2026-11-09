@@ -271,7 +271,7 @@ jgetpy "import json,sys,io;io.open(sys.argv[1],'w',encoding='utf-8').write(json.
   "$PAYLOAD" "$TAG" "M1racle PDF Split $VERSION" "${NOTES_FILE:-}" "$PRERELEASE"
 RELEASE_JSON="$(api POST "/repos/$REPO_SLUG/releases" --data-binary @"$PAYLOAD")"
 RELEASE_ID="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['id'])" "$RELEASE_JSON")"
-DRAFT_FLAG="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])[\'draft\'])" "$RELEASE_JSON")"
+DRAFT_FLAG="$(jgetpy "import json,sys;print(json.loads(sys.argv[1])['draft'])" "$RELEASE_JSON")"
 [ "$DRAFT_FLAG" = "True" ] || die "创建的 Release 不是草稿，拒绝上传"
 ok "Draft Release 已创建 id=$RELEASE_ID（仅校验后公开）"
 
