@@ -205,11 +205,12 @@ private class CancelableSink(
 class PdfRangeSplitter(
     private val context: Context,
     /**
-     * A1 verification harness only. The default keeps production on the lenient
-     * path exactly as shipped; the strict path exists so the "fast load" claim
-     * can be checked against real page output before it is adopted.
+     * [LoadMode.AUTO] is the production policy: try the fast strict parse, prove
+     * every page is still reachable, and fall back to the lenient parse if it is
+     * not. The A1 harness pins this to [LoadMode.STRICT] so it can measure the
+     * fast path in isolation.
      */
-    private val loadMode: LoadMode = LoadMode.LENIENT,
+    private val loadMode: LoadMode = LoadMode.AUTO,
 ) {
 
     private val appContext = context.applicationContext
@@ -333,60 +334,65 @@ class PdfRangeSplitter(
                             val ioBefore = SplitDiagnostics.ioSnapshot()
                             val cpuBefore = SplitDiagnostics.cpuMs()
                             val loadStart = SystemClock.elapsedRealtime()
-                            PdfBoxSetup.load(sourceFile, loadMode).use { source ->
+                            PdfBoxSetup.open(sourceFile, loadMode).let { outcome ->
+                                val source = outcome.document
                                 val loadMs = SystemClock.elapsedRealtime() - loadStart
                                 val ioAfter = SplitDiagnostics.ioSnapshot()
                                 SplitDiagnostics.log(
                                     "load worker=$workerId ms=$loadMs " +
+                                        "mode=${outcome.mode} strictMs=${outcome.strictMs} " +
                                         "cpuMs=${SplitDiagnostics.cpuMs() - cpuBefore} " +
                                         "readBytes=${ioAfter.readBytes - ioBefore.readBytes} " +
                                         "writeBytes=${ioAfter.writeBytes - ioBefore.writeBytes} " +
                                         "rchar=${ioAfter.rchar - ioBefore.rchar} " +
                                         "wchar=${ioAfter.wchar - ioBefore.wchar} " +
                                         "fileBytes=${sourceFile.length()} " +
+                                        "decision=[${outcome.note}] " +
                                         "heapUsedMB=${SplitDiagnostics.heapUsedMb()} " +
                                         "heapMaxMB=${Runtime.getRuntime().maxMemory() / (1024 * 1024)} " +
                                         SplitDiagnostics.gcStat(),
                                 )
-                                if (source.numberOfPages != expectedPageCount) {
-                                    throw PdfSplitFailure(
-                                        "源 PDF 页数已变化：界面上是 $expectedPageCount，" +
-                                            "实际 ${source.numberOfPages}",
-                                    )
-                                }
-                                while (true) {
-                                    currentCoroutineContext().ensureActive()
-                                    val slot = nextSlot.getAndIncrement()
-                                    if (slot >= dispatchOrder.size) break
-                                    val index = dispatchOrder[slot]
-                                    val part = parts[index]
-                                    val partStart = SystemClock.elapsedRealtime()
-                                    val uri = processPart(
-                                        source = source,
-                                        part = part,
-                                        taskIndex = index,
-                                        outputTreeUri = outputTreeUri,
-                                        deepVerify = deepVerify,
-                                        sinkJob = parentJob,
-                                        onStage = { stage, pageInPart ->
-                                            publish(index, stage, pageInPart)
-                                        },
-                                        onCreate = { created -> createdUris.add(created) },
-                                    )
-                                    results[index] = SplitOutput(
-                                        displayName = part.outputName,
-                                        uri = uri,
-                                        pageCount = part.pageCount,
-                                        startPage1 = part.startPage1,
-                                        endPage1 = part.endPage1,
-                                    )
-                                    publish(index, TaskStage.DONE, part.pageCount)
-                                    finishedParts.incrementAndGet()
-                                    SplitDiagnostics.log(
-                                        "part=$index worker=$workerId pages=${part.pageCount} " +
-                                            "totalMs=${SystemClock.elapsedRealtime() - partStart}",
-                                    )
-                                    emitTasks()
+                                source.use {
+                                    if (source.numberOfPages != expectedPageCount) {
+                                        throw PdfSplitFailure(
+                                            "源 PDF 页数已变化：界面上是 $expectedPageCount，" +
+                                                "实际 ${source.numberOfPages}",
+                                        )
+                                    }
+                                    while (true) {
+                                        currentCoroutineContext().ensureActive()
+                                        val slot = nextSlot.getAndIncrement()
+                                        if (slot >= dispatchOrder.size) break
+                                        val index = dispatchOrder[slot]
+                                        val part = parts[index]
+                                        val partStart = SystemClock.elapsedRealtime()
+                                        val uri = processPart(
+                                            source = source,
+                                            part = part,
+                                            taskIndex = index,
+                                            outputTreeUri = outputTreeUri,
+                                            deepVerify = deepVerify,
+                                            sinkJob = parentJob,
+                                            onStage = { stage, pageInPart ->
+                                                publish(index, stage, pageInPart)
+                                            },
+                                            onCreate = { created -> createdUris.add(created) },
+                                        )
+                                        results[index] = SplitOutput(
+                                            displayName = part.outputName,
+                                            uri = uri,
+                                            pageCount = part.pageCount,
+                                            startPage1 = part.startPage1,
+                                            endPage1 = part.endPage1,
+                                        )
+                                        publish(index, TaskStage.DONE, part.pageCount)
+                                        finishedParts.incrementAndGet()
+                                        SplitDiagnostics.log(
+                                            "part=$index worker=$workerId pages=${part.pageCount} " +
+                                                "totalMs=${SystemClock.elapsedRealtime() - partStart}",
+                                        )
+                                        emitTasks()
+                                    }
                                 }
                             }
                         }

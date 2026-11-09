@@ -27,7 +27,9 @@ object PdfPageLabels {
         withContext(Dispatchers.IO) {
             val staged = PdfBoxSetup.stageSource(context, uri) { _, _ -> }
             try {
-                PdfBoxSetup.load(staged.file).use { document -> extract(document) }
+                PdfBoxSetup.open(staged.file, LoadMode.AUTO).document.use { document ->
+                    extract(document)
+                }
             } catch (error: Exception) {
                 null
             } finally {

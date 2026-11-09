@@ -36,3 +36,7 @@ dist/
 
 # Release binary downloads used for post-publish verification
 verify-download/
+
+# JVM crash dumps
+hs_err_pid*.log
+replay_pid*.log

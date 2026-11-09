@@ -35,7 +35,7 @@ object PdfOutlineReader {
         withContext(Dispatchers.IO) {
             val staged = PdfBoxSetup.stageSource(context, uri) { _, _ -> }
             try {
-                PdfBoxSetup.load(staged.file).use { document ->
+                PdfBoxSetup.open(staged.file, LoadMode.AUTO).document.use { document ->
                     buildChapters(document.numberOfPages, collectBookmarks(document))
                 }
             } finally {
@@ -116,7 +116,9 @@ object PdfOutlineReader {
         withContext(Dispatchers.IO) {
             val staged = PdfBoxSetup.stageSource(context, uri) { _, _ -> }
             try {
-                PdfBoxSetup.load(staged.file).use { document -> collectNodes(document) }
+                PdfBoxSetup.open(staged.file, LoadMode.AUTO).document.use { document ->
+                    collectNodes(document)
+                }
             } finally {
                 if (staged.temporary) staged.file.delete()
             }

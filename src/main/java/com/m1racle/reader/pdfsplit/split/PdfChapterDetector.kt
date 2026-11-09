@@ -59,7 +59,7 @@ object PdfChapterDetector {
     ): ChapterDetection = withContext(Dispatchers.IO) {
         val staged = PdfBoxSetup.stageSource(context, uri) { _, _ -> }
         try {
-            PdfBoxSetup.load(staged.file).use { document ->
+            PdfBoxSetup.open(staged.file, LoadMode.AUTO).document.use { document ->
                 val totalPages = document.numberOfPages
                 if (totalPages == 0) {
                     return@use ChapterDetection(emptyList(), 0, 0)

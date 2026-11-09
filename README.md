@@ -72,9 +72,36 @@ export M1RACLE_RELEASE_KEY_PASSWORD=...
 
 详细证据链见 [`docs/load-hotspot-diagnosis-20261108.md`](docs/load-hotspot-diagnosis-20261108.md)。
 
-**当前状态：strict 未设为默认。** 加载策略仍为 lenient，`LoadMode.STRICT` 只被 A1 验证台使用。
+**当前状态（v1.1.1 起）：`LoadMode.AUTO` 已接入生产。** 5 个会完整加载文档的入口（probe、正文扫描、书签读取、页码标签、拆分 worker）全部走 `PdfBoxSetup.open(file, LoadMode.AUTO)`，默认路径是「先严格、探不通再回退宽松」，见下节。
 
-A1 实测（2026-11-09，Xiaomi 25098PN5AC / Android 16）：420 页逐页语义指纹**完全一致**、差异 0、证据不足 0，poppler 独立渲染抽样交叉验证亦一致。strict 作为「有条件启用的快速加载路径」已具备工程化前提，但尚未接入生产（需要先做结构异常识别与失败回退）。结论与证据见 [`docs/a1-result-20261109.md`](docs/a1-result-20261109.md)。
+A1 实测（2026-11-09，Xiaomi 25098PN5AC / Android 16）：420 页逐页语义指纹**完全一致**、差异 0、证据不足 0，poppler 独立渲染抽样交叉验证亦一致。结论与证据见 [`docs/a1-result-20261109.md`](docs/a1-result-20261109.md)。
+
+## 自适应加载：结构识别 + 分层可达性判据
+
+`LoadMode.AUTO` 不是「全局 `setLenient(false)`」，而是一条带闸门的快速路径：
+
+```
+PdfStructureScanner.scan(file)      独立 xref 扫描器，不依赖 PDFBox，1 GB / 15~40 ms
+  → loadStrict                       PDFParser(isLenient = false)
+  → probePageTree(doc, badObjects)   逐页遍历页树 + 解码内容流
+      fatal  → close() 重开 lenient
+      clean  → 采用 strict（快速路径）
+```
+
+闸门判据分三层，避免「结构有瑕疵 ⇒ 一律回退」把性能优化白白抵消：
+
+| 情形 | 判定 | 理由 |
+| --- | --- | --- |
+| 页树 / 内容流无法解析 | **fatal** | 解析本身坏了 |
+| 引用指向坏对象，且该名字被内容流 `Do` 绘制 | **fatal** | 宽松会重扫找到、严格不会，等于真丢图 |
+| 引用指向坏对象，但从未被 `Do` 绘制 | **soft** | 不参与渲染，A1 已证明产物逐页相同 |
+| 引用指向从未声明的对象（两种解析器都返回 null） | **soft** | 源文件本身如此，与加载模式无关 |
+
+绘制判据：对解码后的内容流文本跑 `/([A-Za-z0-9_.+#-]{1,64})\s+Do\b` 收集被绘制名，再与坏引用名比对。决策结果写入日志 `decision=[strict|lenient ... softMiss=N first=...]`，并在源文件卡片上以「快速解析 / 兼容解析 + 耗时」直读展示。
+
+本教材实测（988 MB / 420 页 / 21 条 offset=0）：`softMiss=1`（第 15 页 `/KSPX1` → 坏对象 3148，未被绘制），**不触发回退**，加载 2,887 ms；此前 lenient 为 57,537 ms。
+
+
 
 ## A1 正确性验证台
 
@@ -94,6 +121,8 @@ PC 侧独立渲染器比对（不依赖 PDFBox）：[`tools/a1-render-diff.py`](
 
 - **悬空资源引用已实测收敛**：源文件确有 3 处（`3093→KSPX4 3095`、`3104→KSPX6 3106`、`3146→KSPX1 3148`），但只有 `3146` 在活页树里（第 15 页），该页实际绘制的是存在的对象 `3151`，`3148` 从未被 `Do` 调用；`3093`/`3104` 是孤立页对象。**没有任何页面缺图**（源第 15 页与拆分第 15 页渲染逐字节相同）。
 - strict 与 lenient 的 420 页产物一致性**已实测**：比对页 420 / 完全一致 420 / 差异 0 / 证据不足 0，加载 2,730 ms vs 57,537 ms（21.08×）。详见 [`docs/a1-result-20261109.md`](docs/a1-result-20261109.md)。
+- **AUTO 落地产物已用独立解析器 byte 级复验（v1.1.1）**：poppler 抽取源文件与 21 个产物的全部内嵌图像，423/423 张逐张 SHA-256 完全一致、差异 0；图像结构表（尺寸 / 色彩空间 / bpc / 编码 / 流字节长度）423 条逐条一致。详见 [`docs/a2-auto-load-result-20261109.md`](docs/a2-auto-load-result-20261109.md)。
+- 注意事项：拆分产物的**整包 SHA-256 天然不可复现**（PDFBox 保存时写入随机 trailer `/ID`），不能用整包哈希判同一性，必须以页级 / 流级指纹或独立解析器比对为准。
 - 扩展测试集（正常 PDF / 损坏 xref / 增量更新 / 对象流 / 加密）尚未覆盖。
 - `/proc/self/io` 在本机 app 进程读回全 0，I/O 字节计数缺失。
 

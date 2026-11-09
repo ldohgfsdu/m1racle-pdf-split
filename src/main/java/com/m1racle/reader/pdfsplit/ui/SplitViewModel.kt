@@ -51,6 +51,14 @@ data class SourceInfo(
     val pageLabels: List<String>? = null,
     val probing: Boolean = false,
     val textLayerKnown: Boolean? = null,
+    /** Wall time of the probe's document open, or null before it finishes. */
+    val loadMs: Long? = null,
+    /** True when the fast strict parse won; null while unknown. */
+    val fastLoad: Boolean? = null,
+    /** Cross-reference entries actually read from the file. */
+    val xrefEntries: Int = 0,
+    /** In-use entries that point at offset 0 — a structural defect. */
+    val xrefZeroOffsets: Int = 0,
 )
 
 data class OutlineUiState(
@@ -233,6 +241,10 @@ class SplitViewModel(
                         probing = false,
                         hasOutline = extras?.hasOutline ?: false,
                         pageLabels = extras?.pageLabels,
+                        loadMs = extras?.loadMs,
+                        fastLoad = extras?.fastLoad,
+                        xrefEntries = extras?.xrefEntries ?: 0,
+                        xrefZeroOffsets = extras?.xrefZeroOffsets ?: 0,
                     ),
                 )
             }
