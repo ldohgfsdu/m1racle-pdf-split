@@ -168,9 +168,12 @@ write_checksum "$APK"
 HEAD_SHA="$(git rev-parse HEAD)"
 git tag -a "$TAG" -m "M1racle PDF Split $VERSION" || die "打 tag 失败"
 for i in 1 2 3 4 5; do
-  if git push github "$TAG" 2>/dev/null; then break; fi
-  warn "推送 tag 失败，第 $i 次重试…"; sleep 3
-  [ "$i" = "5" ] && die "推送 tag 连续失败（检查 github.com 可达性）"
+  if push_err="$(git push github "$TAG" 2>&1)"; then break; fi
+  # 保留真实原因：代理隧道 502 / 认证失败 / 非快进 都会被这句盖住，排障时只能盲猜
+  warn "推送 tag 失败（第 $i 次）：$(printf '%s' "$push_err" | grep -E '^[a-z]+:' | head -1)"
+  sleep 3
+  [ "$i" = "5" ] && die "推送 tag 连续失败，最后一次错误：
+$push_err"
 done
 REMOTE_TAG_SHA="$(api GET "/repos/$REPO_SLUG/git/ref/tags/$TAG" | jgetpy "import json,sys;print(json.load(sys.stdin)['object']['sha'])")"
 [ "$REMOTE_TAG_SHA" = "$HEAD_SHA" ] || die "远端 tag 指向 $REMOTE_TAG_SHA，期望 $HEAD_SHA"
