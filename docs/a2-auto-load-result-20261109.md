@@ -2,7 +2,7 @@
 
 日期：2026-11-09
 包：`com.m1racle.reader.pdf` / versionCode 4 / versionName **1.1.1**
-APK：`m1racle-pdf-split-release.apk`，4,581,198 B，SHA-256 `851600e4294068cb1d2c1f7deda0ee2fada6da4b4c8b7edf09c8a178822805e1`
+APK：`m1racle-pdf-split-release.apk`，4,581,198 B，发布件 SHA-256 `a0444d7362dbbb709c1c4313bab28bdff27ecf2dd4f201bcf0430d5cadeb7c90`
 签名：APK Signature Scheme v2 通过，证书 SHA-256 `2d9daba0f92c1d19d290dd58657391a71c16c3008e8a2b90065ba7e8602bf9d1`（生产证书，可覆盖安装）
 真机：Xiaomi 25098PN5AC / Android 16
 样本：`/sdcard/Download/A1源/src.pdf`，420 页 / 1,035,745,318 B（988 MB），纯图像型（每页 1 张 JPEG，600 ppi）
