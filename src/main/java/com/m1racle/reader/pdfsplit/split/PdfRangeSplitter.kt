@@ -435,7 +435,8 @@ class PdfRangeSplitter(
             if (failedReasons.isNotEmpty()) {
                 preserveCompleted = true
                 val completed = results.filterNotNull()
-                val missing = parts.indices.filter { results[it] == null }.map { parts[it] }
+                val completedFlags = BooleanArray(parts.size) { results[it] != null }
+                val missing = SplitRecoveryPolicy.failedIndices(completedFlags).map { parts[it] }
                 val first = failedReasons.entries.minByOrNull { it.key }
                 partialError = PdfPartialFailure(
                     completed = completed,
@@ -455,11 +456,12 @@ class PdfRangeSplitter(
             withContext(NonCancellable) {
                 var undeleted = 0
                 if (!succeeded) {
-                    val keep: Set<Uri> = if (preserveCompleted) {
-                        results.filterNotNull().mapTo(HashSet()) { it.uri }
-                    } else {
-                        emptySet()
-                    }
+                    val completedFlags = BooleanArray(parts.size) { results[it] != null }
+                    val retain = SplitRecoveryPolicy.retainedIndices(
+                        completedFlags,
+                        cancelledOrAborted = !preserveCompleted,
+                    )
+                    val keep: Set<Uri> = retain.mapNotNullTo(HashSet()) { results[it]?.uri }
                     synchronized(createdUris) {
                         createdUris.filterNot { it in keep }.forEach { uri ->
                             val removed = runCatching {
