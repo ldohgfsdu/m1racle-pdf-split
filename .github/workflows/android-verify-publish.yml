@@ -146,12 +146,11 @@ jobs:
           mkdir -p "$RUNNER_TEMP/previous"
           gh release download "$PREVIOUS_TAG" --pattern '*.apk' --dir "$RUNNER_TEMP/previous"
           old_apks=("$RUNNER_TEMP"/previous/*.apk)
-          [[ ${#old_apks[@] == 1 && -f "${old_apks[0]}" ]] || {
+          [[ ${#old_apks[@]} == 1 && -f "${old_apks[0]}" ]] || {
             echo "::error::Expected exactly one previous signed APK"; exit 1;
           }
-          local_apk=build/outputs/apk/release/*.apk
           new_apks=(build/outputs/apk/release/*.apk)
-          [[ ${#new_apks[@] == 1 && -f "${new_apks[0]}" ]]
+          [[ ${#new_apks[@]} == 1 && -f "${new_apks[0]}" ]]
           signer="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/apksigner"
           aapt="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION/aapt2"
           "$signer" verify "${old_apks[0]}"
