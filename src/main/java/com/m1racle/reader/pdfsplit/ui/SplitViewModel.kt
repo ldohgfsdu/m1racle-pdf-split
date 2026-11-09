@@ -302,27 +302,36 @@ class SplitViewModel(
 
     // ── Rules ───────────────────────────────────────────────────────────────
 
-    fun setMode(mode: SplitMode) {
-        // Switching mode starts a new plan; a previous "done" card must not
-        // linger above the new (empty) preview.
-        _state.update {
-            it.copy(mode = mode, run = RunState(), resultPreview = ResultPreviewState())
+    /** Any parameter edit makes the last completed output obsolete.
+     * Guard writes during an active split; a completed run cannot silently
+     * be replayed to create suffix copies of the same output files.
+     */
+    private fun editPlan(change: (SplitUiState) -> SplitUiState) {
+        var modified = false
+        _state.update { current ->
+            if (current.run.phase == RunPhase.RUNNING || current.cleaningUp) return@update current
+            val next = change(current)
+            if (next == current) return@update current
+            modified = true
+            next.copy(
+                run = RunState(generation = next.sourceGeneration),
+                resultPreview = ResultPreviewState(),
+            )
         }
-        persist()
-        schedulePreview()
+        if (modified) {
+            persist()
+            schedulePreview()
+        }
     }
 
-    fun setRangeText(text: String) {
-        _state.update { it.copy(rules = it.rules.copy(rangeText = text)) }
-        persist()
-        schedulePreview()
-    }
+    fun setMode(mode: SplitMode) =
+        editPlan { it.copy(mode = mode) }
 
-    fun setPagesPerPart(text: String) {
-        _state.update { it.copy(rules = it.rules.copy(pagesPerPart = text)) }
-        persist()
-        schedulePreview()
-    }
+    fun setRangeText(text: String) =
+        editPlan { it.copy(rules = it.rules.copy(rangeText = text)) }
+
+    fun setPagesPerPart(text: String) =
+        editPlan { it.copy(rules = it.rules.copy(pagesPerPart = text)) }
 
     fun loadOutline() {
         val source = _state.value.source ?: return
@@ -445,7 +454,7 @@ class SplitViewModel(
     }
 
     fun toggleChapter(index: Int) {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             state.copy(
                 rules = state.rules.copy(
@@ -455,20 +464,18 @@ class SplitViewModel(
                 ),
             )
         }
-        schedulePreview()
     }
 
     fun setDepth(depth: Int) {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             val allowed = depth.coerceIn(1, outline.maxDepth.coerceAtLeast(1))
             state.copy(rules = state.rules.copy(outline = outline.copy(depth = allowed)))
         }
-        schedulePreview()
     }
 
     fun selectAllAtDepth() {
-        _state.update { state ->
+        editPlan { state ->
             val outline = state.rules.outline
             val wanted = outline.nodes.filter { it.depth == outline.depth }
             state.copy(
@@ -477,39 +484,34 @@ class SplitViewModel(
                 ),
             )
         }
-        schedulePreview()
     }
 
     fun clearSelection() {
-        _state.update { state ->
+        editPlan { state ->
             state.copy(
                 rules = state.rules.copy(
                     outline = state.rules.outline.copy(selected = emptySet()),
                 ),
             )
         }
-        schedulePreview()
     }
 
     // ── Output & advanced ───────────────────────────────────────────────────
 
     fun setOutputDirectory(uri: Uri, label: String) {
-        _state.update { it.copy(outputTreeUri = uri, outputLabel = label) }
-        persist()
-        schedulePreview()
+        editPlan { it.copy(outputTreeUri = uri, outputLabel = label) }
     }
 
     fun setDeepVerify(enabled: Boolean) {
-        _state.update { it.copy(deepVerify = enabled) }
-        persist()
+        editPlan { it.copy(deepVerify = enabled) }
     }
 
     fun setConcurrencyAuto(auto: Boolean) {
-        _state.update { it.copy(concurrencyAuto = auto) }
+        editPlan { it.copy(concurrencyAuto = auto) }
     }
 
     fun setConcurrencyManual(value: Int) {
-        _state.update {
+        editPlan {
             it.copy(
                 concurrencyAuto = false,
                 concurrencyManual = ConcurrencyPolicy.sanitize(value, it.cores),
@@ -813,7 +815,9 @@ class SplitViewModel(
 
     fun start() {
         val state = _state.value
-        if (state.run.phase == RunPhase.RUNNING) return
+        if (state.run.phase == RunPhase.RUNNING ||
+            state.run.phase == RunPhase.DONE || state.cleaningUp
+        ) return
         val source = state.source ?: return
         val tree = state.outputTreeUri ?: return
         val generation = state.sourceGeneration
@@ -910,7 +914,9 @@ class SplitViewModel(
                     }
                 }
             } finally {
-                _state.update { it.copy(cleaningUp = false) }
+                _state.update { current ->
+                    if (current.sourceGeneration == generation) current.copy(cleaningUp = false) else current
+                }
                 runJob = null
             }
         }
