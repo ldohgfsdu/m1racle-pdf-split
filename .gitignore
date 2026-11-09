@@ -30,3 +30,6 @@ a1-verify/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Local release staging (APK + notes go to GitHub Releases, not git)
+dist/
