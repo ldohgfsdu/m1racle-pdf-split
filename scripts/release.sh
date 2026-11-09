@@ -216,10 +216,15 @@ else
   ok "Tag $TAG 未被占用"
 fi
 
-# 3. 构建 release（绝不出 debug）
-log "构建 release…"
+# 3. 与 GitHub Actions 相同的模型门禁；不能通过本地脚本绕开
+log "执行六个有界状态模型及 TLA+/TLC 负向验证…"
+"$PY" tools/formal/verify_models.py || die "有界模型验证失败"
+bash formal/pdf/verify_tlc.sh || die "TLA+/TLC 验证失败"
+
+# 4. 构建 release（绝不出 debug，先跑单测和 lint）
+log "执行单测、lint 和正式签名构建…"
 "${JAVA_HOME:+$JAVA_HOME/bin/}java" -classpath "gradle/wrapper/gradle-wrapper.jar" \
-  org.gradle.wrapper.GradleWrapperMain clean testDebugUnitTest assembleRelease --offline --console=plain \
+  org.gradle.wrapper.GradleWrapperMain clean testDebugUnitTest lintDebug assembleRelease --offline --console=plain \
   | tail -5 || die "构建失败"
 APK="$(ls build/outputs/apk/release/*.apk 2>/dev/null | head -1)"
 [ -n "$APK" ] || die "找不到 release APK（是否被签名门禁拦下？）"
