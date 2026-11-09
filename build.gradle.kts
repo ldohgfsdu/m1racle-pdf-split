@@ -38,7 +38,8 @@ val injectedReleaseStoreFile = releaseSigningEnvironment.getValue("M1RACLE_RELEA
 
 android {
     namespace = "com.m1racle.reader.pdfsplit"
-    compileSdk = 37
+    // Android API 36 is available on hosted CI; no API 37 symbols are used by this app.
+    compileSdk = 36
     buildToolsVersion = "36.0.0"
 
     defaultConfig {
