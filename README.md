@@ -123,7 +123,7 @@ PC 侧独立渲染器比对（不依赖 PDFBox）：[`tools/a1-render-diff.py`](
 - strict 与 lenient 的 420 页产物一致性**已实测**：比对页 420 / 完全一致 420 / 差异 0 / 证据不足 0，加载 2,730 ms vs 57,537 ms（21.08×）。详见 [`docs/a1-result-20261109.md`](docs/a1-result-20261109.md)。
 - **AUTO 落地产物已用独立解析器 byte 级复验（v1.1.1）**：poppler 抽取源文件与 21 个产物的全部内嵌图像，423/423 张逐张 SHA-256 完全一致、差异 0；图像结构表（尺寸 / 色彩空间 / bpc / 编码 / 流字节长度）423 条逐条一致。详见 [`docs/a2-auto-load-result-20261109.md`](docs/a2-auto-load-result-20261109.md)。
 - 注意事项：拆分产物的**整包 SHA-256 天然不可复现**（PDFBox 保存时写入随机 trailer `/ID`），不能用整包哈希判同一性，必须以页级 / 流级指纹或独立解析器比对为准。
-- 扩展测试集（正常 PDF / 损坏 xref / 增量更新 / 对象流 / 加密）尚未覆盖。
+- 扩展测试集已覆盖正常文件、损坏 xref、增量更新、对象流、内容流数组和加密扫描器否决。加密文件仍无法用系统文档选择器打开，应用侧本来就不支持解密。
 - `/proc/self/io` 在本机 app 进程读回全 0，I/O 字节计数缺失。
 
 ## 目录
@@ -134,7 +134,7 @@ src/main/java/com/m1racle/reader/pdfsplit/
   split/                   拆分核心（规划、几何、资源、链接、加载策略、SAF 输出）
   ui/                      Compose 界面
   verify/                  A1 正确性验证台
-src/test/                  JVM 单测（42 例，全部纯逻辑，不依赖设备）
+src/test/                  JVM 单测（80 例；内容流数组两条会真正打开 PDF）
 src/debug/                 debug-only 加载基准页（LoadBenchActivity）
 docs/                      设计、诊断与交接文档
 tools/                     PC 侧独立渲染比对脚本
