@@ -319,7 +319,7 @@ fun OutlinedAction(
     ) {
         Text(
             text = text,
-            fontSize = 13.sp,
+            fontSize = 14.sp,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
             color = when {
                 !enabled -> Palette.textTertiary
@@ -411,7 +411,7 @@ fun Section(
         ) {
             Text(
                 text = title,
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Medium,
                 color = Palette.textSecondary,
             )
