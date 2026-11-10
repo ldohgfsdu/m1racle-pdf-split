@@ -23,6 +23,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,57 +41,117 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Visual language is taken from the supplied reference screenshot: near-black
- * canvas, numbered outlined cards, one green accent, a hero page-count badge and
- * a fixed bottom dock. Green is reserved for selection, the primary action,
- * live progress and the few numbers that must be found at a glance.
+ * UI colors use role-based Radix Slate and Green scales. MaterialTheme and the
+ * custom primitives agree on a single palette, following the system appearance
+ * instead of forcing every user into the old black/green screenshot theme.
  */
-object Palette {
-    val background = Color(0xFF080B0A)
-    val card = Color(0xFF121614)
-    val inner = Color(0xFF191F1B)
-    val surface = Color(0xFF0E1210)
-    val surfaceRaised = Color(0xFF1A201C)
-    val cardStroke = Color(0xFF252D28)
-    val stroke = Color(0xFF202722)
-    val strokeStrong = Color(0xFF334038)
-    val textPrimary = Color(0xFFF1F6F2)
-    val textSecondary = Color(0xFFA2B0A7)
-    val textTertiary = Color(0xFF6F7D74)
-    val accent = Color(0xFF4BE3A0)
-    val accentDim = Color(0xFF2BA575)
-    val onAccent = Color(0xFF052316)
-    val warning = Color(0xFFE5B563)
-    val danger = Color(0xFFF0736F)
-    val track = Color(0xFF1E2621)
-}
+data class PdfPalette(
+    val background: Color,
+    val card: Color,
+    val inner: Color,
+    val surface: Color,
+    val surfaceRaised: Color,
+    val cardStroke: Color,
+    val stroke: Color,
+    val strokeStrong: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val textTertiary: Color,
+    val accent: Color,
+    val accentDim: Color,
+    val onAccent: Color,
+    val warning: Color,
+    val danger: Color,
+    val track: Color,
+)
+
+private val lightPdfPalette = PdfPalette(
+    background = Color(0xFFFCFCFD),  // slate 1
+    card = Color(0xFFFFFFFF),
+    inner = Color(0xFFF0F0F3),       // slate 3
+    surface = Color(0xFFF9F9FB),     // slate 2
+    surfaceRaised = Color(0xFFF0F0F3),
+    cardStroke = Color(0xFFD1D1D6), // slate 7
+    stroke = Color(0xFFB9BBC6),     // slate 8
+    strokeStrong = Color(0xFF8B8D98), // slate 9
+    textPrimary = Color(0xFF1C2024), // slate 12
+    textSecondary = Color(0xFF45474E),
+    textTertiary = Color(0xFF60646C), // slate 11
+    accent = Color(0xFF218358),       // green 11: legible on white
+    accentDim = Color(0xFF30A46C),    // green 9
+    onAccent = Color(0xFFFFFFFF),
+    warning = Color(0xFFAD5700),
+    danger = Color(0xFFCE2C31),
+    track = Color(0xFFDEDDE3),
+)
+
+private val darkPdfPalette = PdfPalette(
+    background = Color(0xFF111113),   // slate dark 1
+    card = Color(0xFF1A1B1E),
+    inner = Color(0xFF27282C),
+    surface = Color(0xFF18191B),      // slate dark 2
+    surfaceRaised = Color(0xFF212225),// slate dark 3
+    cardStroke = Color(0xFF43444B),   // slate dark 6
+    stroke = Color(0xFF5A5B63),
+    strokeStrong = Color(0xFF777985),
+    textPrimary = Color(0xFFEDEEF0),  // slate dark 12
+    textSecondary = Color(0xFFB0B2BD),// slate dark 11
+    textTertiary = Color(0xFFA3A5AF),
+    accent = Color(0xFF50C58B),
+    accentDim = Color(0xFF30A46C),
+    onAccent = Color(0xFF082315),
+    warning = Color(0xFFFFC53D),
+    danger = Color(0xFFFF6369),
+    track = Color(0xFF34353B),
+)
+
+private val LocalPdfPalette = staticCompositionLocalOf { lightPdfPalette }
+
+val Palette: PdfPalette
+    @Composable get() = LocalPdfPalette.current
 
 object Dimens {
     val pagePadding = 18.dp
-    val sectionGap = 18.dp
-    val cardGap = 14.dp
-    val cardRadius = 16.dp
-    val innerRadius = 12.dp
-    val controlRadius = 10.dp
+    val sectionGap = 14.dp
+    val cardGap = 12.dp
+    val cardRadius = 12.dp
+    val innerRadius = 9.dp
+    val controlRadius = 9.dp
     val touch = 48.dp
 }
 
 @Composable
 fun PdfSplitTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = darkColorScheme(
-            primary = Palette.accent,
-            onPrimary = Palette.onAccent,
-            background = Palette.background,
-            onBackground = Palette.textPrimary,
-            surface = Palette.card,
-            onSurface = Palette.textPrimary,
-            surfaceVariant = Palette.inner,
-            onSurfaceVariant = Palette.textSecondary,
-            error = Palette.danger,
-        ),
-        content = content,
-    )
+    val dark = isSystemInDarkTheme()
+    val colors = if (dark) darkPdfPalette else lightPdfPalette
+    val scheme = if (dark) {
+        darkColorScheme(
+            primary = colors.accent,
+            onPrimary = colors.onAccent,
+            background = colors.background,
+            onBackground = colors.textPrimary,
+            surface = colors.card,
+            onSurface = colors.textPrimary,
+            surfaceVariant = colors.inner,
+            onSurfaceVariant = colors.textSecondary,
+            error = colors.danger,
+        )
+    } else {
+        lightColorScheme(
+            primary = colors.accent,
+            onPrimary = colors.onAccent,
+            background = colors.background,
+            onBackground = colors.textPrimary,
+            surface = colors.card,
+            onSurface = colors.textPrimary,
+            surfaceVariant = colors.inner,
+            onSurfaceVariant = colors.textSecondary,
+            error = colors.danger,
+        )
+    }
+    CompositionLocalProvider(LocalPdfPalette provides colors) {
+        MaterialTheme(colorScheme = scheme, content = content)
+    }
 }
 
 /** Numbered, outlined card from the reference layout. */
@@ -105,7 +169,7 @@ fun NumberedCard(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Dimens.cardRadius))
             .background(Palette.card)
-            .border(1.dp, Palette.cardStroke, RoundedCornerShape(Dimens.cardRadius))
+.border(0.5.dp, Palette.cardStroke, RoundedCornerShape(Dimens.cardRadius))
             .padding(16.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -167,7 +231,7 @@ fun InnerRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(Dimens.innerRadius))
             .background(Palette.inner)
-            .border(1.dp, Palette.cardStroke, RoundedCornerShape(Dimens.innerRadius))
+.border(0.5.dp, Palette.cardStroke, RoundedCornerShape(Dimens.innerRadius))
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -198,6 +262,7 @@ fun PageCountBadge(text: String) {
 /** Angular green light in the top-right corner of the hero, as in the reference. */
 @Composable
 fun HeroDecoration(modifier: Modifier = Modifier) {
+    val accent = Palette.accent
     Canvas(modifier = modifier) {
         val w = size.width
         val h = size.height
@@ -212,15 +277,15 @@ fun HeroDecoration(modifier: Modifier = Modifier) {
             path = polygon,
             brush = Brush.linearGradient(
                 colors = listOf(
-                    Palette.accent.copy(alpha = 0.20f),
-                    Palette.accent.copy(alpha = 0.015f),
+                    accent.copy(alpha = 0.20f),
+                    accent.copy(alpha = 0.015f),
                 ),
                 start = Offset(w, 0f),
                 end = Offset(w * 0.52f, h),
             ),
         )
         drawLine(
-            color = Palette.accent.copy(alpha = 0.30f),
+            color = accent.copy(alpha = 0.30f),
             start = Offset(w * 0.56f, 0f),
             end = Offset(w * 0.78f, h * 0.34f),
             strokeWidth = 1.5f,
@@ -244,7 +309,7 @@ fun OutlinedAction(
     val background = if (selected) Palette.accent.copy(alpha = 0.10f) else Palette.inner
     Box(
         modifier = modifier
-            .height(42.dp)
+            .height(44.dp)
             .clip(RoundedCornerShape(Dimens.controlRadius))
             .background(background)
             .border(1.dp, borderColor, RoundedCornerShape(Dimens.controlRadius))
