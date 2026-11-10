@@ -65,7 +65,7 @@ data class PdfPalette(
     val track: Color,
 )
 
-private val lightPdfPalette = PdfPalette(
+internal val lightPdfPalette = PdfPalette(
     background = Color(0xFFFCFCFD),  // slate 1
     card = Color(0xFFFFFFFF),
     inner = Color(0xFFF0F0F3),       // slate 3
@@ -85,7 +85,7 @@ private val lightPdfPalette = PdfPalette(
     track = Color(0xFFDEDDE3),
 )
 
-private val darkPdfPalette = PdfPalette(
+internal val darkPdfPalette = PdfPalette(
     background = Color(0xFF111113),   // slate dark 1
     card = Color(0xFF1A1B1E),
     inner = Color(0xFF27282C),
