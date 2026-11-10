@@ -368,7 +368,7 @@ fun PrimaryActionButton(
         enabled = enabled,
         modifier = modifier
             .fillMaxWidth()
-            .height(54.dp),
+            .height(48.dp),
         shape = RoundedCornerShape(14.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = if (running) Palette.inner else Palette.accent,
