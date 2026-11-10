@@ -62,7 +62,6 @@ fun SplitScreen(
 ) {
     var fullName by remember { mutableStateOf<String?>(null) }
     var planExpanded by remember { mutableStateOf(false) }
-    var concurrencyHelp by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -96,7 +95,7 @@ fun SplitScreen(
                     InfoCard(title = "上次运行") {
                         Text(
                             text = state.run.error.orEmpty(),
-                            fontSize = 13.sp,
+                            fontSize = 14.sp,
                             color = Palette.danger,
                         )
                     }
@@ -116,7 +115,7 @@ fun SplitScreen(
         }
 
         if (state.source != null) {
-            BottomDock(state, vm) { concurrencyHelp = true }
+            BottomDock(state, vm)
         }
     }
 
@@ -126,28 +125,11 @@ fun SplitScreen(
             confirmButton = {
                 TextButton(onClick = { fullName = null }) { Text("关闭") }
             },
-            title = { Text("完整文件名", fontSize = 15.sp) },
-            text = { Text(name, fontSize = 13.sp, fontFamily = FontFamily.Monospace) },
+            title = { Text("完整文件名", fontSize = 16.sp) },
+            text = { Text(name, fontSize = 14.sp, fontFamily = FontFamily.Monospace) },
         )
     }
 
-    if (concurrencyHelp) {
-        AlertDialog(
-            onDismissRequest = { concurrencyHelp = false },
-            confirmButton = {
-                TextButton(onClick = { concurrencyHelp = false }) { Text("知道了") }
-            },
-            title = { Text("同时处理几个文件", fontSize = 15.sp) },
-            text = {
-                Text(
-                    text = "数字表示同一时间切分几个章节。数字越大通常越快，但每多一个就会多占一份 PDF 解析内存；" +
-                        "大文件建议保持「自动」。本机上限 ${ConcurrencyPolicy.maxAllowed(state.cores)} 个。",
-                    fontSize = 13.sp,
-                    lineHeight = 20.sp,
-                )
-            },
-        )
-    }
 
     ResultPreviewDialog(state, vm)
 }
@@ -156,46 +138,31 @@ fun SplitScreen(
 
 @Composable
 private fun HeroHeader(state: SplitUiState, onBack: () -> Unit) {
-    Box(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(138.dp),
+            .height(76.dp)
+            .padding(horizontal = Dimens.pagePadding),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        HeroDecoration(modifier = Modifier.matchParentSize())
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = Dimens.pagePadding, vertical = 6.dp),
+        IconButton(
+            onClick = onBack,
+            modifier = Modifier.size(Dimens.touch).offset(x = (-8).dp),
         ) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier.size(Dimens.touch).offset(x = (-10).dp),
-            ) {
-                Text(text = "‹", fontSize = 30.sp, color = Palette.textPrimary)
-            }
-            Spacer(Modifier.height(6.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "PDF 拆分",
-                        fontSize = 27.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Palette.textPrimary,
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "批量按页切分 · 多段同时进行",
-                        fontSize = 12.sp,
-                        color = Palette.textSecondary,
-                    )
-                }
-                PageCountBadge(
-                    text = state.source?.let { "${it.pageCount} 页" } ?: "— 页",
-                )
-            }
+            Text(text = "‹", fontSize = 26.sp, color = Palette.textPrimary)
         }
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = "PDF 拆分",
+            modifier = Modifier.weight(1f),
+            fontSize = 22.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = Palette.textPrimary,
+        )
+        state.source?.let { PageCountBadge("${it.pageCount} 页") }
     }
 }
+
 
 // ── 01 Source ───────────────────────────────────────────────────────────────
 
@@ -257,7 +224,7 @@ private fun SourceCard(
                             }
                         }
                     },
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Palette.textTertiary,
                     maxLines = 1,
@@ -289,7 +256,7 @@ private fun SourceCard(
                     false -> "$head。已使用兼容解析，耗时可能更长。"
                     null -> "$head。"
                 },
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = Palette.textSecondary,
             )
         }
@@ -322,12 +289,7 @@ private fun PdfGlyph() {
 
 @Composable
 private fun RuleCard(state: SplitUiState, vm: SplitViewModel) {
-    val hint = when {
-        state.source?.pageLabels != null -> "本书有印刷页码，请按 PDF 页序填写"
-        state.source?.hasOutline == true -> "检测到书签，可一键按整本目录逐章拆"
-        state.source?.probing == true -> "正在读取目录与文字层…"
-        else -> "整理规则 · 预览命名"
-    }
+    val hint = if (state.source?.probing == true) "读取中…" else null
     NumberedCard(
         number = "02",
         title = "页码与名称",
@@ -354,23 +316,26 @@ private fun RuleCard(state: SplitUiState, vm: SplitViewModel) {
             )
         }
 
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedAction(
-                text = "☰  按整本目录逐章拆",
-                selected = state.mode == SplitMode.OUTLINE &&
-                    state.rules.outline.source == OutlineSource.BOOKMARKS,
-                onClick = vm::splitWholeBookByChapters,
-                modifier = Modifier.weight(1.4f),
-                enabled = !state.rules.outline.loading,
-            )
-            OutlinedAction(
-                text = "读取书签",
-                selected = false,
-                onClick = vm::loadOutline,
-                modifier = Modifier.weight(1f),
-                enabled = !state.rules.outline.loading,
-            )
+        if (state.mode == SplitMode.OUTLINE) {
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedAction(
+                    text = "☰  按整本目录逐章拆",
+                    selected = state.mode == SplitMode.OUTLINE &&
+                        state.rules.outline.source == OutlineSource.BOOKMARKS,
+                    onClick = vm::splitWholeBookByChapters,
+                    modifier = Modifier.weight(1.4f),
+                    enabled = !state.rules.outline.loading,
+                )
+                OutlinedAction(
+                    text = "读取书签",
+                    selected = false,
+                    onClick = vm::loadOutline,
+                    modifier = Modifier.weight(1f),
+                    enabled = !state.rules.outline.loading,
+                )
+            }
+    
         }
 
         if (state.rules.outline.loading) {
@@ -434,14 +399,14 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
                     ),
                     cursorBrush = SolidColor(Palette.accent),
                 )
-                Text(text = "⤢", fontSize = 15.sp, color = Palette.textTertiary)
+                Text(text = "⤢", fontSize = 16.sp, color = Palette.textTertiary)
             }
         }
     }
     Spacer(Modifier.height(8.dp))
     Text(
-        text = "页码示例：1-5、8、12-20；也可换行输入，或粘贴等长的页码列与名称列。",
-        fontSize = 11.sp,
+        text = "页码示例：1-5、8、12-20；支持换行及两列粘贴。",
+        fontSize = 12.sp,
         lineHeight = 17.sp,
         color = Palette.textTertiary,
     )
@@ -449,7 +414,7 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
         Spacer(Modifier.height(4.dp))
         Text(
             text = "本书有印刷页码，输入以「PDF 第 N 页」为准。",
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = Palette.warning,
         )
     }
@@ -459,12 +424,12 @@ private fun PagesInput(state: SplitUiState, vm: SplitViewModel) {
         errors.take(3).forEach { error ->
             Text(
                 text = "第 ${error.line} 行：${error.message}",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = Palette.danger,
             )
         }
         if (errors.size > 3) {
-            Text("还有 ${errors.size - 3} 行有错误", fontSize = 11.sp, color = Palette.danger)
+            Text("还有 ${errors.size - 3} 行有错误", fontSize = 12.sp, color = Palette.danger)
         }
     }
 }
@@ -482,7 +447,7 @@ private fun FixedSizeInput(state: SplitUiState, vm: SplitViewModel) {
             Text("≡", fontSize = 14.sp, color = Palette.accent)
         }
         Spacer(Modifier.width(12.dp))
-        Text("每份页数", fontSize = 13.sp, color = Palette.textPrimary)
+        Text("每份页数", fontSize = 14.sp, color = Palette.textPrimary)
         Spacer(Modifier.width(10.dp))
         CompactNumberField(
             value = state.rules.pagesPerPart,
@@ -490,7 +455,7 @@ private fun FixedSizeInput(state: SplitUiState, vm: SplitViewModel) {
             modifier = Modifier.width(72.dp),
         )
         Spacer(Modifier.width(8.dp))
-        Text("页一份", fontSize = 13.sp, color = Palette.textSecondary)
+        Text("页一份", fontSize = 14.sp, color = Palette.textSecondary)
     }
     Spacer(Modifier.height(10.dp))
     val total = state.source?.pageCount ?: 0
@@ -508,7 +473,7 @@ private fun FixedSizeInput(state: SplitUiState, vm: SplitViewModel) {
     Spacer(Modifier.height(6.dp))
     Text(
         text = "按固定页数切，不提供「均分成 N 份」——那是另一种规则。",
-        fontSize = 11.sp,
+        fontSize = 12.sp,
         color = Palette.textTertiary,
     )
 }
@@ -536,7 +501,7 @@ private fun OutlinePanel(state: SplitUiState, vm: SplitViewModel) {
         Spacer(Modifier.height(8.dp))
         Text(
             text = "纯图片扫描件没有文字层，扫描标题需要 OCR，本版本未包含。",
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = Palette.textTertiary,
         )
         return
@@ -559,7 +524,7 @@ private fun OutlinePanel(state: SplitUiState, vm: SplitViewModel) {
             ) {
                 Text(
                     text = "$depth 级",
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     color = if (active) Palette.onAccent else Palette.textSecondary,
                 )
             }
@@ -591,7 +556,7 @@ private fun OutlinePanel(state: SplitUiState, vm: SplitViewModel) {
     Spacer(Modifier.height(6.dp))
     Text(
         text = "已选 ${outline.selected.size} 个章节；父子章节互斥，避免同一页被写进两个文件。",
-        fontSize = 11.sp,
+        fontSize = 12.sp,
         color = Palette.textTertiary,
     )
 }
@@ -625,7 +590,7 @@ private fun OutlineRow(node: OutlineNode, checked: Boolean, onToggle: () -> Unit
         )
         Text(
             text = "p${node.startPage1}",
-            fontSize = 10.sp,
+            fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             color = Palette.textTertiary,
         )
@@ -646,7 +611,7 @@ private fun OutputCard(
             FolderGlyph()
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text("保存目录", fontSize = 13.sp, color = Palette.textPrimary)
+                Text("保存目录", fontSize = 14.sp, color = Palette.textPrimary)
                 Spacer(Modifier.height(3.dp))
                 Text(
                     text = state.outputLabel ?: "未选择",
@@ -665,7 +630,7 @@ private fun OutputCard(
                 Text(
                     text = "示例：${state.preview.parts.first().outputName}",
                     modifier = Modifier.width(90.dp),
-                    fontSize = 10.sp,
+                    fontSize = 12.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     color = Palette.textTertiary,
@@ -679,7 +644,7 @@ private fun OutputCard(
             ShieldGlyph(enabled = state.deepVerify)
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text("深度校验", fontSize = 13.sp, color = Palette.textPrimary)
+                Text("深度校验", fontSize = 14.sp, color = Palette.textPrimary)
                 Spacer(Modifier.height(3.dp))
                 Text(
                     text = if (state.deepVerify) {
@@ -687,7 +652,7 @@ private fun OutputCard(
                     } else {
                         "只校验页数与页面尺寸（默认，快）"
                     },
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     color = Palette.textTertiary,
                 )
             }
@@ -728,7 +693,7 @@ private fun OutputCard(
             Text(
                 text = "每个同时处理的任务都会额外加载一份 PDF 解析结构，" +
                     "本机上限 ${ConcurrencyPolicy.maxAllowed(state.cores)} 个。",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 lineHeight = 17.sp,
                 color = Palette.textTertiary,
             )
@@ -796,7 +761,7 @@ private fun InfoCard(
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = title,
-                fontSize = 15.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = Palette.textPrimary,
             )
@@ -828,7 +793,7 @@ private fun PlanCard(state: SplitUiState, expanded: Boolean, onToggleExpand: () 
         if (preview.parts.isEmpty()) {
             Text(
                 text = preview.blockedReason ?: "还没有可拆分的区间",
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 color = Palette.textTertiary,
             )
             return@InfoCard
@@ -862,7 +827,7 @@ private fun PlanCard(state: SplitUiState, expanded: Boolean, onToggleExpand: () 
         notes += preview.notes
         notes.forEach { note ->
             Spacer(Modifier.height(6.dp))
-            Text(note, fontSize = 11.sp, color = Palette.warning)
+            Text(note, fontSize = 12.sp, color = Palette.warning)
         }
 
         Spacer(Modifier.height(10.dp))
@@ -871,7 +836,7 @@ private fun PlanCard(state: SplitUiState, expanded: Boolean, onToggleExpand: () 
         if (!expanded && preview.parts.size > 3) {
             Text(
                 text = "还有 ${preview.parts.size - 3} 个…",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = Palette.textTertiary,
             )
         }
@@ -879,7 +844,7 @@ private fun PlanCard(state: SplitUiState, expanded: Boolean, onToggleExpand: () 
             Spacer(Modifier.height(6.dp))
             Text(
                 text = "未包含的页不会写进任何文件（你可能只想拆部分章节）。",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = Palette.textTertiary,
             )
         }
@@ -901,14 +866,14 @@ private fun PreviewRow(part: SplitPart) {
                 "P${part.startPage1}-${part.endPage1}"
             },
             modifier = Modifier.width(84.dp),
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             color = Palette.accent,
         )
         Text(
             text = part.outputName,
             modifier = Modifier.weight(1f),
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -916,7 +881,7 @@ private fun PreviewRow(part: SplitPart) {
         )
         Text(
             text = "${part.pageCount}p",
-            fontSize = 10.sp,
+            fontSize = 12.sp,
             fontFamily = FontFamily.Monospace,
             color = Palette.textTertiary,
         )
@@ -943,7 +908,7 @@ private fun TaskBoard(run: RunState) {
                     if (run.total > 0) append("  ${run.finished}/${run.total}")
                 },
                 modifier = Modifier.weight(1f),
-                fontSize = 13.sp,
+                fontSize = 14.sp,
                 color = Palette.textPrimary,
             )
         }
@@ -953,7 +918,7 @@ private fun TaskBoard(run: RunState) {
             Spacer(Modifier.height(6.dp))
             Text(
                 text = run.detail,
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 color = Palette.textTertiary,
@@ -985,14 +950,14 @@ private fun TaskRow(task: TaskSnapshot) {
             Text(
                 text = "${task.startPage1}-${task.endPage1}",
                 modifier = Modifier.width(70.dp),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 color = if (done) Palette.accent else Palette.textSecondary,
             )
             Text(
                 text = task.name,
                 modifier = Modifier.weight(1f),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1007,7 +972,7 @@ private fun TaskRow(task: TaskSnapshot) {
                     TaskStage.DONE -> "完成"
                     TaskStage.FAILED -> "失败"
                 },
-                fontSize = 10.sp,
+                fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 color = when (task.stage) {
                     TaskStage.DONE -> Palette.accent
@@ -1085,14 +1050,14 @@ private fun ResultCard(state: SplitUiState, vm: SplitViewModel) {
         if (state.outputLabel != null) {
             Text(
                 text = "保存在 ${state.outputLabel}",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 color = Palette.textTertiary,
             )
             Spacer(Modifier.height(8.dp))
         }
         Text(
             text = "点「预览」看每个文件的第一页和最后一页，确认章节切得对不对。",
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             lineHeight = 17.sp,
             color = Palette.textSecondary,
         )
@@ -1109,7 +1074,7 @@ private fun ResultCard(state: SplitUiState, vm: SplitViewModel) {
         Spacer(Modifier.height(8.dp))
         Text(
             text = "目录里已有同名文件时，会显示为 _2、_3 后缀。",
-            fontSize = 11.sp,
+            fontSize = 12.sp,
             color = Palette.textTertiary,
         )
     }
@@ -1130,7 +1095,7 @@ private fun ResultRow(output: SplitOutput, vm: SplitViewModel) {
             Spacer(Modifier.height(4.dp))
             Text(
                 text = "PDF 第 ${output.startPage1}-${output.endPage1} 页 · 共 ${output.pageCount} 页",
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 fontFamily = FontFamily.Monospace,
                 color = Palette.accent,
             )
@@ -1190,7 +1155,7 @@ private fun ResultPreviewDialog(state: SplitUiState, vm: SplitViewModel) {
                         append(" · 共 ${output.pageCount} 页")
                         if (preview.sizeBytes > 0) append(" · ${formatSize(preview.sizeBytes)}")
                     },
-                    fontSize = 11.sp,
+                    fontSize = 12.sp,
                     fontFamily = FontFamily.Monospace,
                     color = Palette.textSecondary,
                 )
@@ -1217,7 +1182,7 @@ private fun ResultPreviewDialog(state: SplitUiState, vm: SplitViewModel) {
                         }
                         Text(
                             text = "对照首尾两页即可确认：起始页是不是章节首页、末尾有没有多切到下一章。",
-                            fontSize = 11.sp,
+                            fontSize = 12.sp,
                             lineHeight = 17.sp,
                             color = Palette.textTertiary,
                         )
@@ -1253,7 +1218,7 @@ private fun PageThumb(label: String, bitmap: Bitmap?) {
                 .background(Palette.inner),
             contentAlignment = Alignment.Center,
         ) {
-            Text("这一页无法渲染", fontSize = 11.sp, color = Palette.textTertiary)
+            Text("这一页无法渲染", fontSize = 12.sp, color = Palette.textTertiary)
         }
     }
     Spacer(Modifier.height(14.dp))
@@ -1262,72 +1227,37 @@ private fun PageThumb(label: String, bitmap: Bitmap?) {
 // ── Bottom dock ─────────────────────────────────────────────────────────────
 
 @Composable
-private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Unit) {
+private fun BottomDock(state: SplitUiState, vm: SplitViewModel) {
     val running = state.run.phase == RunPhase.RUNNING
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(Palette.surface)
-            .padding(horizontal = Dimens.pagePadding, vertical = 12.dp),
+            .padding(horizontal = Dimens.pagePadding, vertical = 7.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(width = 7.dp, height = 14.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Palette.accent),
-            )
-            Spacer(Modifier.width(8.dp))
-            Text("同时处理", fontSize = 12.sp, color = Palette.textSecondary)
-            Spacer(Modifier.width(4.dp))
-            Text(
-                text = "(?)",
-                fontSize = 11.sp,
-                color = Palette.accent,
-                modifier = Modifier.clickable(onClick = onHelp),
-            )
-            Spacer(Modifier.weight(1f))
-            val maxAllowed = ConcurrencyPolicy.maxAllowed(state.cores)
-            listOf(1, 2, 3, 4, 6).filter { it <= maxAllowed }.forEach { value ->
-                DockNumberChip(
-                    value = value,
-                    selected = !state.concurrencyAuto && state.concurrencyManual == value,
-                    onClick = { vm.setConcurrencyManual(value) },
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            Text(
-                text = if (state.concurrencyAuto) {
-                    "自动 ${state.effectiveConcurrency}"
-                } else {
-                    "${state.effectiveConcurrency} 个"
-                },
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
-                color = Palette.accent,
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-        if (!running) {
-            Text(
-                text = when {
-                    state.cleaningUp -> "已取消，正在清理未完成的文件…"
-                    state.run.phase == RunPhase.DONE -> "已生成 ${state.run.outputs.size} 个文件，可逐项预览"
-                    state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
-                        "已完成 ${state.run.outputs.size} 个，失败 ${state.run.failedParts.size} 个，可单独重试"
-                    else -> state.blockedReason
-                        ?: "预计生成 ${state.preview.fileCount} 个 PDF"
-                },
-                fontSize = 11.sp,
-                color = if (state.blockedReason != null) Palette.warning else Palette.textSecondary,
-            )
-            Spacer(Modifier.height(8.dp))
-        }
+        Text(
+            text = when {
+                state.cleaningUp -> "已取消，正在清理未完成文件"
+                running -> "正在拆分：${state.run.finished} / ${state.run.total}"
+                state.run.phase == RunPhase.DONE -> "已完成 ${state.run.outputs.size} 个文件"
+                state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
+                    "成功 ${state.run.outputs.size} 个，失败 ${state.run.failedParts.size} 个"
+                else -> state.blockedReason ?: "预计生成 ${state.preview.fileCount} 个 PDF"
+            },
+            fontSize = 12.sp,
+            color = if (state.blockedReason != null &&
+                state.run.phase == RunPhase.IDLE && !state.cleaningUp
+            ) {
+                Palette.warning
+            } else {
+                Palette.textSecondary
+            },
+        )
+        Spacer(Modifier.height(6.dp))
         PrimaryActionButton(
             text = when {
                 running -> "取消"
-                state.run.phase == RunPhase.DONE -> "已完成，修改规则可再拆"
+                state.run.phase == RunPhase.DONE -> "已完成，请修改规则"
                 state.run.phase == RunPhase.FAILED && state.run.failedParts.isNotEmpty() ->
                     "重试失败的 ${state.run.failedParts.size} 个"
                 else -> "开始拆分"
@@ -1339,28 +1269,28 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel, onHelp: () -> Un
     }
 }
 
+
 // ── Small helpers ───────────────────────────────────────────────────────────
 
 @Composable
 private fun EmptyState(loading: Boolean, error: String?, onPickPdf: () -> Unit) {
-    NumberedCard(number = "01", title = "先选一本 PDF") {
+    NumberedCard(number = "01", title = "选择 PDF") {
         Text(
-            text = "支持按页码、每份页数或整本目录逐章拆，多个章节可以同时处理。",
-            fontSize = 13.sp,
-            lineHeight = 20.sp,
+            text = "导入教材后，可以按章节、指定页码或固定页数拆分。",
+            fontSize = 14.sp,
             color = Palette.textSecondary,
         )
         error?.let {
             Spacer(Modifier.height(10.dp))
-            Text(it, fontSize = 12.sp, color = Palette.danger)
+            Text(it, fontSize = 14.sp, color = Palette.danger)
         }
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(16.dp))
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(50.dp)
-                .clip(RoundedCornerShape(12.dp))
-                .background(Palette.accent)
+                .clip(RoundedCornerShape(Dimens.controlRadius))
+                .background(if (loading) Palette.inner else Palette.accent)
                 .clickable(enabled = !loading, onClick = onPickPdf),
             contentAlignment = Alignment.Center,
         ) {
@@ -1368,26 +1298,20 @@ private fun EmptyState(loading: Boolean, error: String?, onPickPdf: () -> Unit) 
                 CircularProgressIndicator(
                     modifier = Modifier.size(18.dp),
                     strokeWidth = 2.dp,
-                    color = Palette.onAccent,
+                    color = Palette.accent,
                 )
             } else {
                 Text(
-                    text = "▶  选择 PDF",
-                    fontSize = 15.sp,
+                    text = "选择 PDF",
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = Palette.onAccent,
                 )
             }
         }
-        Spacer(Modifier.height(14.dp))
-        Text(
-            text = "也可以从文件管理器、微信里用「打开方式」直接把 PDF 送到这里。",
-            fontSize = 11.sp,
-            lineHeight = 17.sp,
-            color = Palette.textTertiary,
-        )
     }
 }
+
 
 @Composable
 private fun CompactNumberField(

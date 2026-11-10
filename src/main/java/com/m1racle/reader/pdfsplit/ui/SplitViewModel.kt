@@ -244,13 +244,10 @@ class SplitViewModel(
                     it.copy(
                         loadingSource = false,
                         source = basic.copy(probing = true),
-                        rules = it.rules.copy(
-                            rangeText = if (it.rules.rangeText.isBlank()) {
-                                "1-${basic.pageCount}"
-                            } else {
-                                it.rules.rangeText
-                            },
-                        ),
+                        // Do not pre-fill 1-N: it creates a pointless full-document
+                        // clone and makes the primary action look ready before
+                        // the user has actually chosen a split rule.
+                        // User-entered ranges, if any, are retained and rechecked.
                     )
                 }
             }
