@@ -1233,7 +1233,7 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel) {
         modifier = Modifier
             .fillMaxWidth()
             .background(Palette.surface)
-            .padding(horizontal = Dimens.pagePadding, vertical = 10.dp),
+            .padding(horizontal = Dimens.pagePadding, vertical = 7.dp),
     ) {
         Text(
             text = when {
@@ -1245,13 +1245,15 @@ private fun BottomDock(state: SplitUiState, vm: SplitViewModel) {
                 else -> state.blockedReason ?: "预计生成 ${state.preview.fileCount} 个 PDF"
             },
             fontSize = 12.sp,
-            color = if (state.blockedReason != null && !running) {
+            color = if (state.blockedReason != null &&
+                state.run.phase == RunPhase.IDLE && !state.cleaningUp
+            ) {
                 Palette.warning
             } else {
                 Palette.textSecondary
             },
         )
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         PrimaryActionButton(
             text = when {
                 running -> "取消"
