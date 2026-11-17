@@ -1,11 +1,6 @@
 name: Screenshot UI smoke (light and dark)
 
 on:
-  pull_request:
-    paths:
-      - "src/main/java/com/m1racle/reader/pdfsplit/ui/**"
-      - "src/main/java/com/m1racle/reader/pdfsplit/MainActivity.kt"
-      - ".github/workflows/ui-snapshot.yml"
   workflow_dispatch:
 
 permissions:

@@ -1,11 +1,6 @@
 name: PDF Split verify and publish
 
 on:
-  push:
-    branches: [master, "fix/**", "ci/**"]
-    tags: ["v*"]
-  pull_request:
-    branches: [master]
   workflow_dispatch:
     inputs:
       publish:
